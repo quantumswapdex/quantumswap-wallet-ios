@@ -7,8 +7,7 @@
 // be unit-tested in isolation and so a future change to the policy
 // (e.g. swapping in a maintained library like `IOSSecuritySuite`)
 // does not have to re-touch the UI plumbing.
-// Why this exists (audit-grade notes for AI reviewers and human
-// auditors):
+// Why this exists (notes for reviewers):
 // Every other defense in this app rests on the OS-level isolation
 // that iOS gives a sandboxed process: `.completeFileProtection`,
 // Keychain access controls, App-Bound Domains, code-signing of
@@ -61,7 +60,7 @@
 // classifier itself is identical in DEBUG and Release so the
 // report shape is identical and the behaviour is testable from
 // a unit test target.
-// Tradeoffs (audit-grade discipline):
+// Tradeoffs (design discipline):
 // - Heuristic by nature. A nation-state attacker with custom
 // tooling can spoof every signal. The combination with
 // (bundle hash pin) is what gives defense-in-depth: a Frida
@@ -108,8 +107,8 @@ public struct TamperReport: Sendable, Equatable {
 
     /// Diagnostic-only list of probe names that fired (e.g.
     /// `"fs:/Applications/Cydia.app"`). NEVER user-shown - the user
-    /// sees only the high-level severity in the dialog. Auditors and
-    /// AI reviewers should be able to read this directly from a
+    /// sees only the high-level severity in the dialog. Reviewers and
+    /// reviewers should be able to read this directly from a
     /// crash log to understand which probe over-fired without
     /// needing a debugger session.
     public let jailbreakSignals: [String]
@@ -150,7 +149,7 @@ public enum TamperGate {
     /// MUST be called from the main thread because a subset of the
     /// jailbreak probes (URL-scheme handlers) calls
     /// `UIApplication.canOpenURL`, which is MainActor-isolated.
-    /// **Developer-build behaviour (audit note):** the
+    /// **Developer-build behaviour (design note):** the
     /// mitigation calls for "all probes gated on `#if !DEBUG` so
     /// developer builds are not affected." We extend that gate to
     /// ALSO cover `targetEnvironment(simulator)` because:
@@ -214,8 +213,8 @@ public enum TamperGate {
         // dlsym lookup keeps the symbol out of binary-static-
         // analysis tools that historically flagged direct `ptrace`
         // imports.
-        // (audit-grade notes for AI reviewers and human auditors):
-        // the call is `denyDebuggerAttach()` with parentheses, NOT
+        // (notes for reviewers):
+// the call is `denyDebuggerAttach()` with parentheses, NOT
         // a bare expression. The bare-expression form
         // (`denyDebuggerAttach` without parens)
         // resolved to a method-reference value that was discarded
@@ -230,7 +229,7 @@ public enum TamperGate {
     /// Build the full report (bootstrap-cached probes + a fresh
     /// per-call `P_TRACED` check). Safe to call from any thread
     /// after `bootstrap` has run on the main thread.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// `currentReport()` FAILS CLOSED in shipping Release if
     /// `bootstrap()` has not run. The previous behaviour was
     /// `assertionFailure(...)` (a no-op in Release) followed by
@@ -470,7 +469,7 @@ public enum TamperGate {
     // scheme, AND (b) some installed app has registered itself as
     // a handler for the scheme. Cydia / Sileo / Zebra all register
     // the corresponding scheme on install. The schemes are
-    // intentionally declared in `Info.plist` so the audit-friendly
+    // intentionally declared in `Info.plist` so the review-friendly
     // visibility ("this app probes for jailbreak package managers")
     // is itself a benefit: both Apple's static analyser and a
     // human reviewer can see the intent at a glance.
@@ -565,8 +564,8 @@ public enum TamperGate {
             sysctl(mibPtr.baseAddress, UInt32(mibPtr.count), &info, &size, nil, 0)
         }
         if result != 0 {
-            // (audit-grade notes for AI reviewers and human auditors):
-            // the previous policy fell OPEN here on the
+            // (notes for reviewers):
+// the previous policy fell OPEN here on the
             // theory that a sysctl failure is an OS oddity rather
             // than evidence of tampering. That is wrong in a Release
             // build on a real device: the only realistic reasons

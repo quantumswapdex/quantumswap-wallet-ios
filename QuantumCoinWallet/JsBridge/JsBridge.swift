@@ -17,7 +17,7 @@
 // queue. Calling from the main thread will trap with
 // `preconditionFailure`. Use the async wrappers from UI code.
 //
-// (audit-grade notes for AI reviewers and human auditors):
+// (notes for reviewers):
 // the wallet-creation, wallet-decrypt, and signing call shapes use
 // the binary channel `JsEngine.storePendingPayloadBinary` /
 // `consumePendingResultBinary` for `privateKeyBytes` and
@@ -408,7 +408,7 @@ public final class JsBridge: @unchecked Sendable {
 
     /// scrypt-derive via the JS bundle. Returns the raw bridge envelope -
     /// callers should decode the nested `data.key` base64.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// both the Swift caller and the JS handler enforce a
     /// minimum bound on the scrypt parameters. Belt-and-braces:
     /// the Swift `precondition` makes weakening at a Swift call

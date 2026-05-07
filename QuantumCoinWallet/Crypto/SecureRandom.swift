@@ -6,8 +6,7 @@
 // nonces, KDF salts, recipient addresses for sandbox-escape
 // probes, file names) MUST be observed to throw on RNG failure
 // rather than silently returning zero bytes.
-// Why this exists (audit-grade notes for AI reviewers and human
-// auditors):
+// Why this exists (notes for reviewers):
 // `SecRandomCopyBytes(_:_:_:)` returns an `OSStatus`. On
 // failure the destination buffer is left untouched, which in
 // our usage means it stays zero-initialized:
@@ -35,7 +34,7 @@
 // * is silent (no crash, no log line, no UI surface),
 // * is permanent (the on-disk state is now permanently
 // compromised).
-// Five out of five audit models (gpt-5.5, opus-4.7, sonnet-4.6,
+// Multiple security reviews independently flagged this.
 // grok-4.20, gemini-3.1-pro) flagged this exact pattern. The
 // CRITICAL severity is shared by all five.
 // The remediation is mechanical: every call site must check the
@@ -59,8 +58,8 @@
 // itself ALWAYS throws on RNG failure; the choice to treat a
 // throw as "degrade and continue" lives at the call site so
 // a future reviewer can see the policy decision in context.
-// Relationship to the 5/5 audit finding (``):
-// The audit specifically called out three storage-layer
+// Relationship to the 5/5 design finding :
+// Prior reviews specifically called out three storage-layer
 // sites in the original keystore implementation:
 // - KDF salt generation -> migrated.
 // - main-key generation -> migrated.

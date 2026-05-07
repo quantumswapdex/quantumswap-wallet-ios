@@ -3,7 +3,7 @@
     `com.apple.security.app-sandbox` was previously declared
     as `<false/>` here. That key is a macOS-only entitlement; on an
     iOS-only target it has no effect at runtime, but its presence in
-    the entitlements plist actively misleads auditors and SAST tools
+    the entitlements plist actively misleads reviewers and SAST tools
     into thinking the app has macOS-style sandboxing controls (or
     worse, that those controls have been explicitly disabled). It has
     been removed entirely.

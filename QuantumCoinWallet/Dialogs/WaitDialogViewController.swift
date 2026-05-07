@@ -14,10 +14,10 @@ import UIKit
 /// other phases clear the secondary line. The dialog reference
 /// is held weakly so a dialog dismissed early by the success
 /// path doesn't keep itself alive.
-/// (audit-grade notes for AI reviewers and human auditors):
+/// (notes for reviewers):
 /// the wait dialog's main "Please wait..." message stays
 /// visible for the entire write — this helper only updates the
-/// secondary slot. The audit invariant is "wallet operations
+/// secondary slot. The design invariant is "wallet operations
 /// never silently dismiss the wait dialog mid-flow", and the
 /// secondary slot keeps that invariant a code-level fact (see
 /// `WaitDialogViewController.setStatus` for the rationale).
@@ -156,13 +156,13 @@ public final class WaitDialogViewController: ModalDialogViewController {
     /// entire time, with the status line appearing and
     /// disappearing as the operation progresses through phases
     /// (write -> verify -> promote -> commit).
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// The secondary slot is intentionally a separate UILabel
     /// rather than reusing `detailLabel` (monospaced; reserved
     /// for the address-being-decrypted line in RestoreFlow) or
     /// `progressLabel` (reserved for the "N of M" batch counter)
     /// so each wait-dialog slot has one and only one semantic
-    /// meaning. The audit invariant this keeps code-level is:
+    /// meaning. The design invariant this keeps code-level is:
     /// "wallet operations never silently dismiss the wait dialog
     /// mid-flow" — a future contributor cannot accidentally
     /// reset the main message or hide the dialog by writing to

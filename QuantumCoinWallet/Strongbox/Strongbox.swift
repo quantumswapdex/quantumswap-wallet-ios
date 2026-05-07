@@ -3,8 +3,7 @@
 // Owns the snapshot lifecycle (rebuilt on unlock, dropped on
 // relock) and exposes typed getters/setters for every wallet-
 // semantic field. Closes the call-site half of ``.
-// Why this exists (audit-grade notes for AI reviewers and human
-// auditors):
+// Why this exists (notes for reviewers):
 // In an earlier shape of the app, every screen reached into
 // `PrefConnect` directly to read or write a wallet-meaningful
 // field. That made it structurally impossible to enforce the
@@ -387,7 +386,7 @@ public final class Strongbox: @unchecked Sendable {
     /// `UnlockCoordinatorV2.createNewStrongboxWithInitialWallet` so
     /// the first-launch bootstrap and the first-wallet-add can
     /// share a single atomic mutation transaction.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the wallet's `idx` should match what `appendWallet` would
     /// have assigned (i.e. 0 for the first wallet) so a future
     /// `appendWallet` can compute `maxWalletIndex + 1` and not
@@ -396,7 +395,7 @@ public final class Strongbox: @unchecked Sendable {
     /// this `Wallet.encryptedSeed` and changing the idx here would
     /// require re-encryption.
     /// Cross-references:
-    ///   - SECURITY_AUDIT_FINDINGS.md UNIFIED-D004 (atomic
+    ///   - (atomic
     ///     bootstrap+append closes this).
     public static func snapshotWithInitialWallet(
         _ wallet: StrongboxPayload.Wallet) -> StrongboxPayload {
@@ -534,7 +533,7 @@ public final class Strongbox: @unchecked Sendable {
     /// partial-decrypt or post-decrypt corruption as an
     /// explicit tamper-detected error rather than silently
     /// rebuilding a corrupted UI state.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the comparison is constant-time over the underlying
     /// bytes, NOT a Swift `String.==`. This is defense-in-depth
     /// only - the checksum is base64 (printable ASCII), and

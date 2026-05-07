@@ -3,7 +3,7 @@
 // `complete` writer for the v2 strongbox file format. Closes
 // `` (file protection class) and `` (crash-safe two-
 // slot rotation with `F_FULLFSYNC`).
-// Verify-before-promote layer (added by Part 3 of the durability
+// Verify-before-promote layer (added by the durability fix of the durability
 // fix plan):
 // `writeAndVerify(_:to:verify:onPhase:)` is the canonical write
 // entry point. After F_FULLFSYNCing the .tmp fd it re-reads the
@@ -22,14 +22,13 @@
 //     match what we'd derive from the password we just used to
 //     seal the wraps)
 // This is the third defense layer (after two-slot rotation and
-// F_FULLFSYNC) called out in SECURITY_AUDIT_FINDINGS.md's
-// "Defense layering" paragraph; it closes UNIFIED-D010 and
-// backstops UNIFIED-D004 / D011. The existing single-arg
+// F_FULLFSYNC) called out in the security findings doc's
+// "Defense layering" paragraph; it closes the durability gap and
+// backstops a prior durability gap. The existing single-arg
 // `write(_:to:)` is a thin wrapper that calls `writeAndVerify`
 // with a no-op verify so callers that don't need the deep verify
 // (the codec's re-mirror path) compile unchanged.
-// Why this exists (audit-grade notes for AI reviewers and
-// human auditors):
+// Why this exists (notes for reviewers):
 // The legacy `PrefConnect`-backed write path (`writeJson`
 // then `Data.write(to:options: .atomic)`) is robust against
 // *abrupt-app-kill* (SIGKILL during write -> rename either
@@ -184,7 +183,7 @@ public final class AtomicSlotWriter {
     ///   wire this so a secondary "Verifying..." status line appears
     ///   between F_FULLFSYNC and rename, then clears on promote.
     /// Cross-references:
-    ///   - SECURITY_AUDIT_FINDINGS.md UNIFIED-D010 (silent corruption
+    ///   - (silent corruption
     ///     between flash write and unlock-time read).
     ///   - `WaitDialogViewController.setStatus(_:)` — the secondary
     ///     status slot the UI callers update inside the callback.
@@ -213,7 +212,7 @@ public final class AtomicSlotWriter {
     /// Base name of the slot files, sans the `.A.json` /
     /// `.B.json` suffix. Mirrors the existing legacy file name
     /// `DP_QUANTUM_COIN_WALLET_APP_PREF` used by `PrefConnect`
-    /// so an audit can grep both v1 and v2 locations easily.
+    /// so an reviewer can grep both v1 and v2 locations easily.
     public static let baseFilename = "DP_QUANTUM_COIN_WALLET_APP_PREF"
 
     private init() {}
@@ -303,9 +302,9 @@ public final class AtomicSlotWriter {
     /// time winner. The caller observes the throw and MUST NOT bump
     /// the anti-rollback counter.
     /// What it closes:
-    ///   SECURITY_AUDIT_FINDINGS.md UNIFIED-D010 (silent corruption
+    ///   (silent corruption
     ///   between flash write and unlock-time read). Backstop for
-    ///   UNIFIED-D005 (parent-dir fsync failure was previously
+    ///   a prior durability gap (parent-dir fsync failure was previously
     ///   swallowed; see `dirSyncFailed` throw below in step 6).
     /// Why this shape (verify-callback rather than codec-aware layer):
     ///   AtomicSlotWriter is intentionally schema-blind (layer 1 of
@@ -375,8 +374,8 @@ public final class AtomicSlotWriter {
         // in-cache copy. Then invoke the caller's verify closure
         // against the re-read bytes. Throwing aborts the rename in
         // the next step, leaving the final slot untouched.
-        // (audit-grade notes for AI reviewers and human auditors):
-        // the [.uncached] hint is a Best-Effort signal to the OS;
+        // (notes for reviewers):
+// the [.uncached] hint is a Best-Effort signal to the OS;
         // it does not guarantee a media-level read on every iOS
         // release. The defense-in-depth is the codec's deep verify
         // (re-MAC + AEAD-open + byte-compare), which also catches
@@ -412,13 +411,13 @@ public final class AtomicSlotWriter {
         // can sit in the journal indefinitely. On power loss the
         // new file's data blocks would be orphaned and the parent
         // directory would still point at the OLD inode.
-        // (audit-grade notes for AI reviewers and human auditors):
-        // the previous shape LOGGED and SWALLOWED a directory-fsync
+        // (notes for reviewers):
+// the previous shape LOGGED and SWALLOWED a directory-fsync
         // failure on the rationale that "the rename's metadata
         // entry is not yet on flash but the data blocks ARE, so
         // the next read just sees the previous-good slot which the
         // two-slot rotation absorbs". With the verify-before-promote
-        // layer (Part 3 of the durability fix), that rationale
+        // layer (durability fix), that rationale
         // changed: the .tmp was already deep-verified and the
         // rename committed at the metadata level, so a directory-
         // fsync failure here means we will bump the anti-rollback
@@ -427,7 +426,7 @@ public final class AtomicSlotWriter {
         // which catches via its existing storageUnavailable map
         // and SKIPS the counter bump. The user sees a "could not
         // save" error instead of a silent rollback.
-        // Closes UNIFIED-D005.
+        // Closes the durability gap.
         let dirURL = finalURL.deletingLastPathComponent
         let dirFd = dirURL().path.withCString { open($0, O_RDONLY) }
         if dirFd >= 0 {

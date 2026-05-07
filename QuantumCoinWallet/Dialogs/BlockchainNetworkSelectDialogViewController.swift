@@ -194,7 +194,7 @@ public final class BlockchainNetworkSelectDialogViewController: ModalDialogViewC
     /// password is preserved for typo-fix retry; the password
     /// field is refocused once the alert is dismissed (handled
     /// inside `showOrangeError`).
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the `tooManyAttempts` branch surfaces the centralised
     /// lockout copy from `UnlockAttemptLimiter` so the user
     /// understands the gate is throttling them by design. The

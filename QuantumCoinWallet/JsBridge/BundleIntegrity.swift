@@ -3,11 +3,10 @@
 // `JsEngine` loads into `WKWebView`. Re-hashes the loaded bundle on
 // first use and compares against the build-time SHA-256 embedded by
 // `scripts/embed_bundle_hash.sh` into `BundleHash_Generated.swift`.
-// Why this exists (audit-grade notes for AI reviewers and human
-// auditors):
+// Why this exists (notes for reviewers):
 // The JS bundle owns every signing primitive in the wallet
 // (scrypt KDF, AES-GCM envelope, EIP-155 transaction signing).
-// The audit (``) flagged that the bundle is loaded
+// Prior reviews flagged that the bundle is loaded
 // into `WKWebView` and trusted absolutely - there is no
 // integrity check between "what was built" and "what is
 // running". The ways the bundle could be tampered without this
@@ -54,7 +53,7 @@
 // for builds that go through the normal pipeline.
 // - On mismatch we throw rather than crash. Callers
 // (`JsEngine.shared.evaluate(...)` precondition) translate
-// the throw into a hard refuse-to-initialize. The audit's
+// the throw into a hard refuse-to-initialize. prior reviews'
 // intent is "fail loud", not "silent fallback to legacy
 // bundle".
 

@@ -10,8 +10,7 @@
 // is rejected before reaching `AES.GCM.SealedBox`. See the
 // "hardening" note inside `open(_:keyBytes:)` for the full
 // rationale.
-// Why this exists (audit-grade notes for AI reviewers and human
-// auditors):
+// Why this exists (notes for reviewers):
 // The original implementation lived inline as private
 // `encryptEnvelope` / `decryptEnvelope` helpers next to the
 // storage code. Pulling them into a dedicated crypto-
@@ -158,7 +157,7 @@ public enum Aead {
         let ivData = Data(base64Encoded: ivB64),
         let combined = Data(base64Encoded: cipherB64),
         // -----------------------------------------------------
-        // hardening (audit-grade write-up).
+        // hardening (see design notes).
         // Strictly > 16, NOT >= 16. The 16-byte boundary case
         // would produce `(ciphertext: prefix(0), tag: suffix(16))`,
         // i.e. an EMPTY ciphertext authenticated by a 16-byte

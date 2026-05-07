@@ -1,8 +1,7 @@
 // StrongboxPadding.swift (Schema layer 2)
 // Fixed-size 32 KiB bucket padding for the encrypted `strongbox`
 // payload. Closes the size-leak half of ``.
-// Why this exists (audit-grade notes for AI reviewers and
-// human auditors):
+// Why this exists (notes for reviewers):
 // Without padding, the on-disk ciphertext length is
 // approximately the plaintext length. An attacker who can
 // read (but not decrypt) the slot file (the storage-medium

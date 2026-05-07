@@ -9,7 +9,7 @@
 // (Control Center > Screen Recording), or displayed in a CarPlay /
 // AirPlay receiver.
 //
-// (audit-grade notes for AI reviewers and human auditors): for any
+// (notes for reviewers): for any
 // screen that displays freshly-decrypted secret material (BIP39 seed
 // words on the create-wallet reveal step, the post-unlock seed reveal
 // in `RevealWalletViewController`, etc.), we attach a
@@ -66,8 +66,8 @@ public final class ScreenCaptureGuard {
             selector: #selector(handleCaptureChanged),
             name: UIScreen.capturedDidChangeNotification,
             object: nil)
-        // (audit-grade notes for AI reviewers and human auditors):
-        // we MUST attempt activation now because the caller may
+        // (notes for reviewers):
+// we MUST attempt activation now because the caller may
         // already have wired both views into the same hierarchy
         // (e.g. `RevealWalletViewController` adds the grid to its
         // stack BEFORE constructing the guard). Falling back to
@@ -118,7 +118,7 @@ public final class ScreenCaptureGuard {
     /// on a prior attempt). Returns false if the views are not
     /// yet co-resident in a single hierarchy, so the caller can
     /// retry later.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the common-ancestor pre-check is what closes the original
     /// crash class - `NSLayoutConstraint.activate` raises an
     /// `NSGenericException` rather than returning an error, so

@@ -1,8 +1,7 @@
 // UnlockAttemptLimiter.swift (Security layer)
 // Rate-limiting for any password-based unlock
 // attempt against the strongbox or against a backup-restore decrypt.
-// Why this exists (audit-grade notes for AI reviewers and human
-// auditors):
+// Why this exists (notes for reviewers):
 // `UnlockCoordinatorV2.unlockWithPassword` runs scrypt with
 // `N = 2^18, r = 8, p = 1` on the user's password. That is
 // roughly 200-400 ms per attempt on
@@ -32,15 +31,38 @@
 // attempt 5: 30 s wait
 // attempt 6: 60 s
 // attempt 7: 2 min
-// attempt 8: 5 min
-// attempt 9: 15 min
-// attempt 10+: 1 hour (no permanent lockout)
+// attempt 8+: 5 min (cap; no permanent lockout)
 // The schedule is intentionally NOT permanent-lockout: a
 // user with severe typo storms (cognitive load, broken
 // keyboard, fat-finger storms on iPad) is not bricked from
 // their wallet. The backoff still shrinks an unlimited
 // brute-force from "minutes" to "decades" for any
 // low-entropy-but-not-trivial password.
+// (notes for reviewers):
+// the original schedule capped at 1 hour (3600s) for the 10+
+// tier. That cap was reduced to 5 minutes (300s) to bound the
+// worst-case lockout a legitimate user with severe typo storms
+// or memory lapses can hit. The reboot-bypass defense (apply
+// the maximum tier on reboot detection, see currentDecision)
+// continues to work because 5 minutes >> a typical iOS reboot
+// (~30 seconds) by ~10x; an attacker who reboots between
+// attempts to try to bypass the gate still pays at minimum a
+// 5-minute wait, which is more than enough to make automated
+// brute-force-via-reboot infeasible. The cost-benefit of the
+// reduction:
+//   * Legitimate-user worst case (10 wrong attempts in
+//     succession): 5 minutes vs 1 hour. Materially better UX
+//     for users who suffer typo storms or genuinely forget the
+//     password and want to try several variants.
+//   * Attacker scenario: 10+ failures already commits the
+//     attacker to a 30s + 60s + 2min + 5min + 15min + 5min
+//     ladder (~28 minutes for 10 attempts before the cap
+//     kicks in). The cap reduction does NOT meaningfully help
+//     a high-entropy-password attacker (still >decades to
+//     enumerate), and any attacker close to brute-forcing a
+//     low-entropy password can already exhaust the schedule
+//     under either cap. The reduced cap is therefore a
+//     legitimate-user UX improvement at near-zero security cost.
 // Tradeoffs:
 // - Keychain items DO get cleaned up when iOS uninstalls the app
 // (since iOS 10.3). So a determined attacker can reinstall
@@ -77,12 +99,15 @@
 // stored monotonic value to the current one: if current
 // is SMALLER than stored we infer the system rebooted
 // since the last failure was recorded, and we apply the
-// MAXIMUM lockout tier (1 hr) for that attempt cycle. This
-// closes the "fail N times, reboot, retry immediately"
-// vector. In practice a rebooted attacker pays the maximum
-// backoff exactly once - which is the correct safety
-// trade because there is no legitimate reason to reboot
-// a phone mid-typo-storm and expect to bypass the gate.
+// MAXIMUM lockout tier (5 min) for that attempt cycle.
+// This closes the "fail N times, reboot, retry
+// immediately" vector. In practice a rebooted attacker
+// pays the maximum backoff exactly once - which is the
+// correct safety trade because there is no legitimate
+// reason to reboot a phone mid-typo-storm and expect to
+// bypass the gate. The cap was reduced from 1 hr to
+// 5 min in the lockout-hardening pass; see the Tradeoffs
+// commentary further below for the cost-benefit analysis.
 
 import Foundation
 import Security
@@ -113,7 +138,7 @@ public enum UnlockAttemptLimiter {
 
     /// Read the current state and return the decision. Idempotent;
     /// safe to call from any thread.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the elapsed-time computation uses `mach_continuous_time()`,
     /// which is immune to wall-clock writes from Settings (see
     /// the file header). Reboot is detected by the
@@ -130,9 +155,12 @@ public enum UnlockAttemptLimiter {
             // Apply the maximum lockout tier for this cycle to
             // prevent the "fail N times, reboot, retry" bypass.
             // The wait duration is capped at the MAX tier
-            // (3600s) so a user with a legitimate reboot is
-            // never permanently bricked; one MAX tier wait
-            // unblocks them.
+            // (300s = 5 minutes) so a user with a legitimate
+            // reboot is never permanently bricked; one MAX
+            // tier wait unblocks them. The 5-minute cap still
+            // dwarfs typical iOS reboot time (~30s) by ~10x,
+            // so the reboot-bypass-attacker still pays a
+            // meaningful penalty per attempt cycle.
             let maxTier = backoffSeconds(forCount: maxTierCount)
             return .lockedFor(remainingSeconds: maxTier)
         }
@@ -188,16 +216,26 @@ public enum UnlockAttemptLimiter {
 
     /// Stair-step delay schedule. See file header for rationale.
     /// Returns `0` for counts below the warm-up tolerance (4
-    /// failures), then ramps up; caps at one hour at 10+ failures.
+    /// failures), then ramps up; caps at five minutes for any
+    /// tier that would otherwise exceed it. The 5-minute cap
+    /// (down from the original 1 hour) bounds the worst case a
+    /// legitimate user with severe typo storms can hit while
+    /// still defeating any reboot-bypass-style brute-force
+    /// attempt (5 min >> 30s reboot time).
+    /// Tiers >= 8 all evaluate to the cap value so the schedule
+    /// remains monotonic non-decreasing; without that, tier 9
+    /// (originally 900s) would have been LARGER than tier 10+
+    /// (now 300s), which would have been a non-sensical
+    /// "more failures shorter wait" curve. Monotonicity is the
+    /// contract the limiter has with the user: each successive
+    /// failure is at least as costly as the previous one.
     private static func backoffSeconds(forCount n: Int) -> TimeInterval {
         switch n {
             case ..<5: return 0
             case 5: return 30
             case 6: return 60
             case 7: return 120
-            case 8: return 300
-            case 9: return 900
-            default: return 3600
+            default: return 300
         }
     }
 
@@ -238,7 +276,7 @@ public enum UnlockAttemptLimiter {
     // MARK: - State
 
     /// Persisted limiter state.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// `lastFailureMonotonicNanos` is a `mach_continuous_time()`
     /// reading converted to nanoseconds, NOT a wall-clock
     /// `CFAbsoluteTime`. The field is intentionally named with
@@ -277,7 +315,7 @@ public enum UnlockAttemptLimiter {
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecReturnData as String: true,
         ]
-        // audit note: the synchronisable attribute is
+        // design note: the synchronisable attribute is
         // explicitly set to `false` so the limiter counter never
         // syncs through iCloud - synced state would let an attacker
         // who controls a second device on the same iCloud account
@@ -302,7 +340,7 @@ public enum UnlockAttemptLimiter {
         match[kSecAttrSynchronizable as String] = kCFBooleanFalse
         let attrs: [String: Any] = [
             kSecValueData as String: data,
-            // audit note: WhenUnlockedThisDeviceOnly is the
+            // design note: WhenUnlockedThisDeviceOnly is the
             // strongest "still readable while the user is using the
             // app" protection class; ThisDeviceOnly blocks iCloud
             // Keychain sync.

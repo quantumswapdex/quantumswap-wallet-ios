@@ -3,7 +3,7 @@
 // with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` plus
 // `kSecAttrSynchronizable=false`.
 //
-// (audit-grade notes for AI reviewers and human auditors):
+// (notes for reviewers):
 // this file used to manage TWO Keychain items:
 //   1. A per-device AES "wrap" key that sealed `mainKey` into
 //      `wrap.keychainWrap` so a future biometric unlock UI
@@ -89,7 +89,7 @@ public enum KeychainWrapStore {
     /// pre-unlock (so the EULA flag and language code are
     /// available before the password); they need an integrity
     /// guarantee that does NOT require the password.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the returned `Data` is sensitive MAC key material.
     /// Callers MUST hold it in a `var` and zero it via
     /// `defer { result.resetBytes(in: 0..<result.count) }` as
@@ -118,7 +118,7 @@ public enum KeychainWrapStore {
     /// app. Returns `true` if an entry was deleted, `false` if
     /// none was present, and surfaces only catastrophic
     /// `OSStatus` errors via `throws`.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the caller MUST suppress and log all
     /// non-success outcomes; a Keychain hiccup at launch must
     /// never block the user from reaching the unlock dialog.

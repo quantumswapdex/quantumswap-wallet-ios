@@ -7,8 +7,7 @@
 // treat scrypt as an abstract "password -> 32-byte derived
 // key" function without having to know about the JS bridge
 // envelope shape.
-// Why this exists (audit-grade notes for AI reviewers and
-// human auditors):
+// Why this exists (notes for reviewers):
 // The scrypt parameters are mandatory cross-platform
 // constants (see `JsBridge.SCRYPT_N/R/P/KEY_LEN`). Any
 // change to N, r, p, or keyLen breaks every existing

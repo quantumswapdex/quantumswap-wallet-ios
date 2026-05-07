@@ -268,8 +268,8 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         let title = makeTitle(L.getPhoneBackupByLangValues())
         let topRule = makeRule()
         let body = makeBody(L.getBackupPromptByLangValues())
-        // (audit-grade notes for AI reviewers and human
-        // auditors): short-term mitigation. The
+        // (notes for reviewers):
+// short-term mitigation. The
         // BACKUP_ENABLED toggle controls only the
         // `isExcludedFromBackup` resource flag on the slot
         // files, which iOS honours for iCloud Backup and
@@ -299,7 +299,7 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
                 guard let tag = group.selectedTag else {
                     self.showSelectAnOption(); return
                 }
-                // PrefConnect setters are now throwing (Part 5). A
+                // PrefConnect setters are now throwing. A
                 // failed flush here downgrades to "next launch sees
                 // BACKUP_ENABLED_KEY at the previous value" rather
                 // than data loss; log + continue.
@@ -659,8 +659,8 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         // is fast enough to feel instant on the seed reveal step.
         Task.detached(priority: .userInitiated) { [keyType] in
             do {
-                // (audit-grade notes for AI reviewers and human
-                // auditors): `createRandom` returns a
+                // (notes for reviewers):
+// `createRandom` returns a
                 // `WalletEnvelope` whose `privateKey`/`publicKey`
                 // are `Data`. We do NOT use them on this path
                 // (only the address + seed words are needed for
@@ -735,7 +735,7 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         // stays visible the entire time; "Verifying..." flashes ON
         // during the integrity-check window between F_FULLFSYNC and
         // rename, then OFF on promote. See
-        // `WaitDialogViewController.setStatus` for the audit
+        // `WaitDialogViewController.setStatus` for prior reviews
         // invariant, and `AtomicSlotWriter.writeAndVerify` for the
         // closure called between writeAll and rename.
         let onPhase = makeVerifyingPhaseHandler(for: wait)
@@ -747,14 +747,14 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
                 // `{seedWords:[...]}` payload (bridge.html line 372).
                 let walletInputJson = BackupExporter.encodeWalletInput(seedWords: seedWords)
                 // First-launch bootstrap vs returning-user paths:
-                // - First launch (no slot file): use Part 6's atomic
+                // - First launch (no slot file): use the hardening's atomic
                 //   `createNewStrongboxWithInitialWallet` so the
                 //   first wallet is committed inside the SAME slot
                 //   write that creates the strongbox. A power-cut
                 //   between the historical pair (createNewStrongbox
                 //   + appendWallet) could leave an "empty wallet"
                 //   strongbox the user trusted as saved — closes
-                //   UNIFIED-D004.
+                //   a prior durability gap.
                 // - Returning user (slot file present): unlock the
                 //   existing strongbox and append.
                 // Both paths re-derive the mainKey from the user's
@@ -957,8 +957,8 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         button?.isEnabled = false
         Task.detached(priority: .userInitiated) { [weak self, weak button] in
             do {
-                // (audit-grade notes for AI reviewers and human
-                // auditors): we only need `address` for the
+                // (notes for reviewers):
+// we only need `address` for the
                 // confirm screen, but we still must zeroize
                 // the binary key material so the ONLY surviving
                 // copy in process memory is what
@@ -1039,10 +1039,10 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
                 let walletInputJson = BackupExporter.encodeWalletInput(seedWords: seedWords)
                 // Same atomic-bootstrap rationale as
                 // `commitGeneratedWallet`: on a fresh install
-                // (.noStrongbox) we use Part 6's atomic
+                // (.noStrongbox) we use the hardening's atomic
                 // createNewStrongboxWithInitialWallet so a power-
                 // cut never leaves an empty-wallet strongbox the
-                // user has trusted as saved. Closes UNIFIED-D004.
+                // user has trusted as saved. Closes the durability gap.
                 let encEnv = try JsBridge.shared.encryptWalletJson(
                     walletInputJson: walletInputJson, password: password)
                 guard let enc = BackupExporter.extractEncryptedJson(encEnv) else {
@@ -1832,13 +1832,12 @@ public final class SeedChipGrid: UIView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// BIP39 seed words must NOT be exposed to VoiceOver as
     /// individual chip labels. A user with VoiceOver
     /// enabled in a public space would otherwise have each seed
     /// word read out loud the moment focus walks the grid.
-    /// (audit-grade notes for AI reviewers and human auditors,
-    /// retraction of prior position): the previous rationale
+    /// (notes for reviewers): ///retraction of prior position): the previous rationale
     /// exempted editable mode from VoiceOver suppression
     /// on the argument that "the user already knows what they
     /// typed". That rationale is now retracted. The threat is not

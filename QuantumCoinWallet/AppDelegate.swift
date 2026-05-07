@@ -75,7 +75,7 @@ public final class AppDelegate: UIResponder, UIApplicationDelegate {
         // because:
         // - "App crashed at launch" looks like a normal bug to
         // the user; a visible "tamper detected" message is
-        // audit-grade observable.
+        // design observable.
         // - The wallet must NOT proceed to onboarding on a
         // tampered bundle, so we do not call `JsEngine.shared`
         // or `BlockchainNetworkManager.bootstrap` below.

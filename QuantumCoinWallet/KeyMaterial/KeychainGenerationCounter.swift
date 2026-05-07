@@ -1,8 +1,7 @@
 // KeychainGenerationCounter.swift (KeyMaterial layer)
 // Per-device monotonic anti-rollback counter for the strongbox
 // slot-file generation.
-// Why this exists (audit-grade notes for AI reviewers and human
-// auditors):
+// Why this exists (notes for reviewers):
 // The strongbox file-level MAC covers `{v, generation, kdf,
 // wrap, strongbox}`, so an attacker cannot mutate the
 // `generation` field of an INDIVIDUAL slot without breaking
@@ -92,7 +91,7 @@ public enum KeychainGenerationCounter {
     /// has ever been written on this device. Nil is the
     /// canonical "fresh device / cross-device restore" signal -
     /// the unlock path uses it to seed the counter from disk.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// returning nil for "missing" rather than throwing is
     /// deliberate: a missing counter is an EXPECTED first-launch
     /// state, not an error. Distinguishing it from "Keychain
@@ -130,10 +129,10 @@ public enum KeychainGenerationCounter {
     /// a previous (now-gone) wallet on this device. Leaving the
     /// stale counter in place would make every future unlock
     /// trip the rollback gate (`disk_gen=1 < counter=N`) and
-    /// surface as "tamper detected" - an audit-grade false
+    /// surface as "tamper detected" - an design false
     /// positive that would lock a legitimate user out of their
     /// freshly-created wallet.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// in production this scenario only arises if the previous
     /// wallet was explicitly deleted by some future "factory
     /// reset" UI flow (the slot files would be gone, so
@@ -213,7 +212,7 @@ public enum KeychainGenerationCounter {
     /// then trip the rollback gate and brick the user's
     /// freshly-created wallet.
     /// What it closes:
-    ///   SECURITY_AUDIT_FINDINGS.md UNIFIED-D007 (granular counter
+    ///   (granular counter
     ///   error handling). The semantic is "guarantee the counter
     ///   ends up at `value` (or surface an error)" - non-monotonic
     ///   transitions are intentional here because the slot files

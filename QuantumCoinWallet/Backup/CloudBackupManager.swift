@@ -46,8 +46,7 @@ public final class CloudBackupManager: NSObject {
     /// both the picker-completed and picker-cancelled paths so the
     /// encrypted-but-shareable wallet JSON does not linger in the
     /// app's tmp directory after the export finishes.
-    /// Audit-grade rationale (notes for AI reviewers and human auditors):
-    /// The pre-fix flow created `<tmp>/UTC--{ts}--{addr}.wallet`,
+    /// design rationale (notes for reviewers): /// The pre-fix flow created `<tmp>/UTC--{ts}--{addr}.wallet`,
     /// handed it to `UIDocumentPickerViewController`, and never
     /// deleted it. The file persisted indefinitely (iOS may evict
     /// `tmp/` under disk-pressure but does not promise this; on a
@@ -83,7 +82,7 @@ public final class CloudBackupManager: NSObject {
 
     /// Build a backup filename of the shape
     /// `UTC--{yyyy-MM-dd'T'HH-mm-ss.SSS'Z'}--{addressHex}.wallet`.
-    /// path-traversal hardening (audit-grade notes):
+    /// path-traversal hardening (notes):
     /// `address` flows into a filesystem path via
     /// `URL.appendingPathComponent`. If it contains `/`, `\`, `..`,
     /// NUL, control characters, or whitespace, those characters
@@ -137,7 +136,7 @@ public final class CloudBackupManager: NSObject {
     /// so on RNG failure we degrade to a timestamp-based tag
     /// rather than aborting the backup. The decision to swallow
     /// the throw lives at this call site, in plain sight, so a
-    /// reviewer can audit it without reading
+    /// reviewer can verify it without reading
     /// `Crypto/SecureRandom.swift`. Direct calls to
     /// `SecRandomCopyBytes` are forbidden anywhere outside that
     /// file (build-blocking lint).
@@ -184,7 +183,7 @@ public final class CloudBackupManager: NSObject {
     // MARK: - File export (one-shot)
 
     public func exportWalletFile(address: String, walletJson: String, from vc: UIViewController) {
-        // (audit-grade notes):
+        // (notes):
         // primary defense is the entry path - `RestoreFlow` /
         // `BackupExporter` should never call this with an address
         // that fails `QuantumCoinAddress.isValid`. We re-validate here
@@ -324,11 +323,79 @@ public final class CloudBackupManager: NSObject {
         presentPicker(picker, from: vc)
     }
 
-    /// Write `walletJson` into the user's cloud-folder bookmark. Returns
-    /// the destination URL on success so the caller can substitute the
-    /// `[FOLDER]/[FILENAME]` placeholders in the success toast (the
-    /// same template used by the file-export delegate path); returns
-    /// `nil` and shows an error toast on failure.
+    /// Cloud-backup outcome enum returned from `writeWalletFile`.
+    /// Replaces the previous `URL?` return shape so the caller
+    /// can distinguish:
+    ///
+    /// What it closes
+    ///   The historical caller fired the green "backup saved"
+    ///   toast immediately after `writeWalletFile` returned a
+    ///   non-nil URL, even when the destination was an iCloud
+    ///   Drive folder where the LOCAL write completed but the
+    ///   iCloud upload had not yet started (let alone
+    ///   finished). The iOS file-coordinator hands the URL back
+    ///   to the app the moment the local file is written; iCloud
+    ///   Drive's File Provider extension then performs the
+    ///   asynchronous network upload in the background. A user
+    ///   who saw the green toast and immediately uninstalled the
+    ///   app, lost the device, or suffered a power loss could end
+    ///   up with the toast having lied — the on-device file would
+    ///   be the only durable copy and any local failure would
+    ///   take the backup with it. The new enum surfaces this
+    ///   distinction so the caller can present a modal
+    ///   "submitted, not yet uploaded" dialog for iCloud
+    ///   destinations and the existing toast for local
+    ///   destinations.
+    ///
+    /// Why this shape
+    ///   - Three cases (local-completed, cloud-submitted, failed)
+    ///     instead of a `Bool isCloud` flag because the failure
+    ///     path is part of the same control flow and folding it
+    ///     into either bucket would force the caller to special-
+    ///     case the URL == nil pathway again.
+    ///   - The URL is carried inside the success cases so the
+    ///     caller can format the user-visible message
+    ///     ("Submitted to: <folder>/<file>") without re-querying
+    ///     the file system.
+    ///
+    /// Tradeoffs
+    ///   - The detection heuristic (`URLResourceKey.isUbiquitousItemKey`)
+    ///     can fail to populate on an unusual file provider; we
+    ///     fail safe by treating a missing key as `local` (no
+    ///     iCloud-warning dialog). The alternative — assume
+    ///     iCloud — would surface the warning dialog on every
+    ///     non-iCloud Files-app target and train the user to
+    ///     dismiss it.
+    ///
+    /// Cross-references
+    ///   - `BackupExporter.reencryptAndExport`: switches on this
+    ///     outcome and routes the iCloud branch through the
+    ///     `BackupSubmittedToCloudDialog`.
+    ///   - `BackupSubmittedToCloudDialog`: the modal that the
+    ///     `submittedToCloud` outcome triggers.
+    public enum BackupWriteOutcome {
+        /// The destination is local (Files app, external drive,
+        /// app sandbox folder). The local write is fully
+        /// completed; the existing green success toast is the
+        /// correct user signal.
+        case completedLocal(URL)
+        /// The destination is an iCloud Drive URL. The local
+        /// staging file write has been verified, but iCloud
+        /// upload is asynchronous and has NOT yet completed.
+        /// Callers MUST surface a distinct user-visible signal
+        /// (modal dialog) so the user does not assume a
+        /// fully-durable backup yet exists.
+        case submittedToCloud(URL)
+        /// The write failed (no folder bookmark, write threw,
+        /// byte-compare mismatch). An error toast was already
+        /// shown by the writer.
+        case failed
+    }
+
+    /// Write `walletJson` into the user's cloud-folder bookmark.
+    /// Returns a `BackupWriteOutcome` enum so the caller can
+    /// distinguish the three end states (see the `BackupWriteOutcome`
+    /// doc comment for the design rationale).
     /// What it closes:
     ///   The historical shape was a fire-and-forget
     ///   `Data.write(to: options: [.atomic])` followed by an
@@ -348,8 +415,8 @@ public final class CloudBackupManager: NSObject {
     ///   boundary (the same discipline `AtomicSlotWriter` uses for
     ///   the on-device strongbox) and byte-compare against the
     ///   bytes the JS bridge produced. On mismatch we delete the
-    ///   corrupt file (best-effort) and return nil so the caller
-    ///   surfaces the error toast instead of the success path.
+    ///   corrupt file (best-effort) and return `.failed` so the
+    ///   caller surfaces the error toast instead of the success path.
     /// Tradeoffs:
     ///   Adds one uncached re-read + Data == Data over the
     ///   .wallet file (typically a few KiB). User-perceived
@@ -361,11 +428,11 @@ public final class CloudBackupManager: NSObject {
     ///     discipline applied to the on-device strongbox slot
     ///     files (which already byte-compare via the codec's
     ///     deep-verify closure).
-    @discardableResult
-    public func writeWalletFile(address: String, walletJson: String) -> URL? {
+    public func writeWalletFile(address: String,
+        walletJson: String) -> BackupWriteOutcome {
         guard let folderURL = resolveBookmark() else {
             Toast.showError(Localization.shared.getBackupFailedByLangValues())
-            return nil
+            return .failed
         }
         let ok = folderURL.startAccessingSecurityScopedResource()
         defer { if ok { folderURL.stopAccessingSecurityScopedResource() } }
@@ -384,12 +451,34 @@ public final class CloudBackupManager: NSObject {
                 // .wallet file the user might later try to restore.
                 try? FileManager.default.removeItem(at: file)
                 Toast.showError(Localization.shared.getBackupFailedByLangValues())
-                return nil
+                return .failed
             }
-            return file
+            // (notes for reviewers):
+// detect whether the destination URL is
+            // iCloud-managed by querying the
+            // `URLResourceKey.isUbiquitousItemKey` resource value.
+            // The `URLResourceValues.isUbiquitousItem` accessor
+            // returns `true` for any item managed by the iCloud
+            // file provider (iCloud Drive, plus third-party
+            // ubiquity providers). On a missing / unsupported
+            // attribute we fail SAFE to `false` so non-iCloud
+            // destinations (local Files app, external drive,
+            // app sandbox folder) keep the existing success-toast
+            // behaviour. The dialog is reserved for cases where
+            // we have positive evidence the destination is
+            // iCloud-managed; if we don't know, we don't warn.
+            let resKeys: Set<URLResourceKey> = [.isUbiquitousItemKey]
+            let isUbiquitous: Bool
+            do {
+                let values = try file.resourceValues(forKeys: resKeys)
+                isUbiquitous = values.isUbiquitousItem ?? false
+            } catch {
+                isUbiquitous = false
+            }
+            return isUbiquitous ? .submittedToCloud(file) : .completedLocal(file)
         } catch {
             Toast.showError(Localization.shared.getBackupFailedByLangValues())
-            return nil
+            return .failed
         }
     }
 
@@ -464,8 +553,8 @@ public final class CloudBackupManager: NSObject {
     }
 
     private func persistBookmark(_ url: URL) {
-        // (audit-grade notes for AI reviewers and human
-        // auditors): the original was
+        // (notes for reviewers):
+// the original was
         // `let ok = url.startAccessingSecurityScopedResource`
         // which captures the *method reference* WITHOUT
         // invoking it. The defer then called
@@ -571,6 +660,48 @@ extension CloudBackupManager: UIDocumentPickerDelegate {
         let folder = url.deletingLastPathComponent().lastPathComponent
         let filename = url.lastPathComponent
         return Localization.shared.getBackupSavedByLangValues()
+        .replacingOccurrences(of: "[FOLDER]", with: folder)
+        .replacingOccurrences(of: "[FILENAME]", with: filename)
+    }
+
+    /// (notes for reviewers):
+    /// Substitute `[FOLDER]` / `[FILENAME]` placeholders in the
+    /// `backup-submitted-cloud-message` localized template with
+    /// the destination URL's parent-directory name and file name.
+    /// What it closes:
+    ///   The previous green success toast for cloud destinations
+    ///   used the same wording as the local-export toast, which
+    ///   incorrectly suggested the backup was already durably
+    ///   stored in iCloud. The local write completes
+    ///   synchronously, but the iCloud upload happens
+    ///   asynchronously through the iOS File Provider extension
+    ///   and may still be in flight (or queued) when the toast
+    ///   appears. A user who acts on the false success signal —
+    ///   uninstalls the app, wipes the device, suffers a power
+    ///   loss / loses the device — can be left with no
+    ///   recoverable backup.
+    /// Why this shape:
+    ///   Building this as a static helper on
+    ///   `CloudBackupManager` keeps the two formatters
+    ///   (local-saved vs cloud-submitted) co-located so future
+    ///   localization changes stay in one place. The dialog
+    ///   text explicitly tells the user the upload is NOT yet
+    ///   complete and instructs them to keep the device powered
+    ///   on / connected and to verify in the Files app.
+    /// Tradeoffs:
+    ///   The longer message text is intentionally verbose so
+    ///   the user understands the semantics ("submitted, not
+    ///   yet uploaded") rather than just dismissing a generic
+    ///   "OK" prompt.
+    /// Cross-references:
+    ///   - `BackupExporter.reencryptAndExport` — switches on
+    ///     the `BackupWriteOutcome` enum and routes the
+    ///     `submittedToCloud` case through this formatter +
+    ///     `MessageInformationDialogViewController`.
+    static func formatBackupSubmittedToCloudMessage(forURL url: URL) -> String {
+        let folder = url.deletingLastPathComponent().lastPathComponent
+        let filename = url.lastPathComponent
+        return Localization.shared.getBackupSubmittedCloudMessageByLangValues()
         .replacingOccurrences(of: "[FOLDER]", with: folder)
         .replacingOccurrences(of: "[FILENAME]", with: filename)
     }

@@ -113,7 +113,7 @@ public final class PasswordTextField: UIView {
         tf.autocapitalizationType = .none
         tf.autocorrectionType = .no
         // textContentType is set in `configure` from `purpose` so
-        // every call site goes through one auditable switch instead
+        // every call site goes through one verifiable switch instead
         // of hardcoding `.password` here.
         tf.translatesAutoresizingMaskIntoConstraints = false
         return tf
@@ -213,7 +213,7 @@ public final class PasswordTextField: UIView {
 
     /// Route the iOS textContentType from our semantic `Purpose`.
     /// Keeping this switch in one place ensures the
-    /// `.password` / `.newPassword` distinction is auditable from a
+    /// `.password` / `.newPassword` distinction is verifiable from a
     /// single grep target across the codebase.
     private func applyPurpose() {
         switch purpose {

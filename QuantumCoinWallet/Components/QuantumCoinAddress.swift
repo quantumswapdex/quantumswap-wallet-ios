@@ -2,7 +2,7 @@
 // Strict shape validator for QuantumCoin's 0x-prefixed 32-byte
 // addresses (64 hex characters after the prefix).
 //
-// (audit-grade notes for AI reviewers and human auditors):
+// (notes for reviewers):
 // this validator is a SHAPE-ONLY pre-filter for synchronous
 // Swift call sites that need a same-thread answer
 // (filesystem path safety, URL composition safety, Keychain
@@ -21,7 +21,7 @@
 // address" call here, route through `JsBridge.isValidAddress`
 // instead. The Send screen does this in `tapSend` (see
 // `SendViewController.swift`).
-// Rationale (audit-grade notes for AI reviewers and human auditors):
+// Rationale (notes for reviewers):
 // The wallet treats an "address" as a primary identifier in many
 // places: filesystem paths (backup file names), Keychain item
 // identifiers, RPC URL path components, dedup keys, signing-target
