@@ -4,8 +4,7 @@
 // Closes `` (rename top-level fields), `` (file-level
 // MAC + rollback detection), and the schema half of ``
 // (Strongbox accessor).
-// Why this exists (audit-grade notes for AI reviewers and
-// human auditors):
+// Why this exists (notes for reviewers):
 // This is the *only* file in the wallet that knows the v2
 // slot-file JSON shape. Every other layer either:
 // * Layer 1 sees only opaque bytes (`AtomicSlotWriter`).
@@ -17,7 +16,7 @@
 // post-padding-stripped `StrongboxPayload`.
 // Concentrating the schema knowledge here means a future
 // schema bump (v2 -> v3) only edits this file plus the
-// migration appendix. Auditing the schema does not require
+// migration appendix. Reviewing the schema does not require
 // reading any other layer.
 // On-disk layout (canonical JSON, single source of truth here):
 // {
@@ -48,7 +47,7 @@
 // files' `ui` blocks - or replaces one slot's `ui` block
 // with attacker-chosen contents - cannot re-bind it under
 // the original MAC.
-// (audit-grade notes for AI reviewers and human auditors):
+// (notes for reviewers):
 // the empty-ui case hashes the canonical bytes `{}`
 // (`JSONSerialization.data(withJSONObject: [:],
 // options: [.sortedKeys])`), giving a single well-defined
@@ -175,8 +174,7 @@ public enum StrongboxFileCodec {
         /// schema accepts ONLY this exact string today; an
         /// unknown / typo'd value is rejected at decode time
         /// with `Error.malformedJson("envelope.alg=...")`.
-        /// (audit-grade notes for AI reviewers and human
-        /// auditors): centralising the literal here closes the
+        /// (notes for reviewers):/// centralising the literal here closes the
         /// "two writers disagree on the spelling" failure mode
         /// (the historical `AES-GC` typo in
         /// `UnlockCoordinatorV2.sealToEnvelope`). A future
@@ -227,7 +225,7 @@ public enum StrongboxFileCodec {
     /// Read both slots and return ALL valid candidates ordered by
     /// generation descending (winner first, runner-up second).
     /// What it closes:
-    ///   SECURITY_AUDIT_FINDINGS.md UNIFIED-D003. The historical
+    ///   . The historical
     ///   `readWinner()` returned a single candidate; if the
     ///   highest-generation slot was structurally pre-MAC valid
     ///   but failed the file-level MAC or strongbox AEAD step at
@@ -253,7 +251,7 @@ public enum StrongboxFileCodec {
     ///   because layer 4 reuses `derivedKey` across candidates
     ///   when their `kdfSalt` matches (the common case).
     /// Cross-references:
-    ///   - SECURITY_AUDIT_FINDINGS.md UNIFIED-D003.
+    ///   - .
     ///   - `UnlockCoordinatorV2.unlockWithPassword` for the
     ///     fallback driver.
     ///   - `StrongboxRedundancyState` for the user-visible
@@ -291,7 +289,7 @@ public enum StrongboxFileCodec {
     /// Encode the supplied component values into the v2 JSON
     /// shape, compute the file-level MAC, and durably commit the
     /// resulting bytes to the inactive slot.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the `ui` block hashes into `uiBlockHash` inside the MAC
     /// scope so an attacker cannot swap two slots' `ui` blocks
     /// - or replace one slot's `ui` block with attacker-chosen
@@ -332,7 +330,7 @@ public enum StrongboxFileCodec {
     ///   budget the verify pass already has from the disk re-read;
     ///   below user perception under all realistic wallet sizes.
     /// Cross-references:
-    ///   - SECURITY_AUDIT_FINDINGS.md UNIFIED-D010 (closed by this).
+    ///   - (closed by this).
     ///   - `AtomicSlotWriter.writeAndVerify` for the atomicity layer
     ///     that hosts the verify closure.
     ///   - `UnlockCoordinatorV2.persistSnapshot` /
@@ -400,7 +398,7 @@ public enum StrongboxFileCodec {
 
     /// Step-by-step deep verify of the just-staged slot bytes.
     /// Extracted from the verify closure so the eight steps each
-    /// have an explicit name in stack traces and so future audit
+    /// have an explicit name in stack traces and so future
     /// reviews can pattern-match each step against this method's
     /// docstring rather than reading nested closure code.
     /// Steps (any of which throws on failure, aborting the rename):
@@ -502,7 +500,7 @@ public enum StrongboxFileCodec {
     /// SHA-256 of the canonical (sortedKeys) JSON of the ui
     /// block. The empty case hashes `{}`. This is the value
     /// stored in `uiBlockHash` and bound by the file-level MAC.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// callers MUST use this helper rather than re-implementing
     /// the canonicalisation - an inconsistency in how the ui
     /// block is normalised before hashing would let an attacker
@@ -608,8 +606,8 @@ public enum StrongboxFileCodec {
         let mac = Data(base64Encoded: macB64)
         else { throw Error.missingField("mac") }
 
-        // (audit-grade notes for AI reviewers and human
-        // auditors): the on-disk `uiBlockHash` MUST match the
+        // (notes for reviewers):
+// the on-disk `uiBlockHash` MUST match the
         // SHA-256 of the canonical on-disk `ui` block. A
         // mismatch means the `ui` block was tampered (someone
         // swapped two slots' `ui` blocks, or replaced one
@@ -664,8 +662,8 @@ public enum StrongboxFileCodec {
         let ct = Data(base64Encoded: ctB64),
         let tag = Data(base64Encoded: tagB64)
         else { return nil }
-        // (audit-grade notes for AI reviewers and human
-        // auditors): strict `alg` validation closes the
+        // (notes for reviewers):
+// strict `alg` validation closes the
         // historical `AES-GC` typo path. That typo in
         // `sealToEnvelope`
         // produced slot files whose envelopes carried an
@@ -746,7 +744,7 @@ public enum StrongboxFileCodec {
     /// trial. Up to TWO retries (immediate + 2-second backoff)
     /// before flagging single-slot redundancy state.
     /// What it closes:
-    ///   SECURITY_AUDIT_FINDINGS.md UNIFIED-D012. The historical
+    ///   . The historical
     ///   shape used `try?` for both the read-back and the write,
     ///   so a transient I/O failure left the surviving slot
     ///   single-redundant indefinitely with no user-visible signal.
@@ -765,7 +763,7 @@ public enum StrongboxFileCodec {
     ///   delay the user-visible banner for no recovery benefit.
     /// Cross-references:
     ///   - `StrongboxRedundancyState` for the process-level flag.
-    ///   - SECURITY_AUDIT_FINDINGS.md UNIFIED-D012.
+    ///   - .
     private static func scheduleReMirror(of decoded: DecodedFile,
         into slot: AtomicSlotWriter.Slot,
         attempt: Int = 0) {
@@ -858,7 +856,7 @@ public enum StrongboxFileCodec {
     /// `scheduleReMirror` makes the race a code-level
     /// impossibility rather than a "we hope the OS scheduler
     /// gets it right".
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// `writeNewGeneration` itself is called from the unlock-
     /// critical path and runs synchronously on the caller's
     /// queue (typically the background actor that is doing

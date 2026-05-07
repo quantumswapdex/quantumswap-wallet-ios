@@ -29,7 +29,7 @@ public final class ApiClient: @unchecked Sendable {
     //   on the main queue. Concurrent read+write on a Swift `String` is
     //   undefined behaviour at the language level - the read can tear
     //   and produce a malformed URL, and on rare scheduling can crash
-    //   inside CFString's COW machinery. This is UNIFIED-006's
+    //   inside CFString's COW machinery. This is the prior race-condition gap's
     //   ApiClient facet.
     // Why this shape (NSLock + private storage + computed accessor):
     //   Identical to the discipline in `Utilities/Constants.swift`'s
@@ -42,7 +42,7 @@ public final class ApiClient: @unchecked Sendable {
     //   The lock is uncontended in practice (one writer, intermittent
     //   readers); cost is ~10 ns per acquire on modern iPhones.
     // Cross-references:
-    //   - UNIFIED-006 (data race; ApiClient facet).
+    //   - a prior race condition (data race; ApiClient facet).
     //   - `QuantumCoinWallet/Utilities/Constants.swift` for the matching
     //     `_networkLock` pattern this code mirrors.
     //   - `QuantumCoinWallet/Data/BlockchainNetwork.swift`'s
@@ -162,8 +162,8 @@ public final class ApiClient: @unchecked Sendable {
 }
 
 // MARK: - AccountsApi
-// (audit-grade notes for AI reviewers and human
-// auditors): every public method here takes an `address` argument
+// (notes for reviewers):
+// every public method here takes an `address` argument
 // and uses it as a URL path segment. The address is supposed to be
 // the wallet's own address (which goes through validation in the
 // onboarding / restore flow before being persisted), but because

@@ -142,8 +142,7 @@ public final class RestoreFlow {
     /// Detailed loader: returns either a `Candidate` or a
     /// human-readable failure reason. Callers choose whether to
     /// aggregate the reasons into a UI message.
-    /// Failure modes covered explicitly (audit-grade notes for AI
-    /// reviewers and human auditors):
+    /// Failure modes covered explicitly (notes for reviewers):
     /// * `.icloud` placeholder URL: an iCloud Drive file the user
     /// selected before iOS finished downloading it. The picker
     /// hands us the placeholder URL; reading it returns no bytes.
@@ -174,8 +173,8 @@ public final class RestoreFlow {
     }
 
     private func loadCandidateDetailed(from url: URL) -> CandidateLoadResult {
-        // (audit-grade notes for AI reviewers and human
-        // auditors): the original
+        // (notes for reviewers):
+// the original
         // `let ok = url.startAccessingSecurityScopedResource`
         // captures the method reference WITHOUT invoking it,
         // and the defer's `ok()` then started the resource
@@ -380,7 +379,7 @@ public final class RestoreFlow {
         Strongbox.shared.index(forAddress: candidate.address) != nil {
             return .alreadyExists
         }
-        // (audit-grade notes): backup-restore is the
+        // (notes): backup-restore is the
         // second of two brute-force channels (the first is the
         // strongbox unlock dialog, gated inside
         // `UnlockCoordinatorV2.unlockWithPasswordAndApplySession`).
@@ -408,8 +407,8 @@ public final class RestoreFlow {
             // Backup (which all decrypt with the strongbox
             // password) would fail with `authenticationFailed` on
             // the inner layer.
-            // (audit-grade notes for AI reviewers and human
-            // auditors): the decrypted envelope holds the
+            // (notes for reviewers):
+// the decrypted envelope holds the
             // private/public key bytes as `Data`; we do NOT use
             // them on this path (we re-encrypt below using
             // `seedWords` as the input shape, which is the
@@ -424,8 +423,8 @@ public final class RestoreFlow {
                 envelope.publicKey.resetBytes(in: 0..<envelope.publicKey.count)
             }
 
-            // (audit-grade notes for AI reviewers and
-            // human auditors): integrity check on the file's
+            // (notes for reviewers):
+// integrity check on the file's
             // self-declared address. The JS bridge derives the address
             // from the recovered private key; that derived value is
             // an INDEPENDENT source of truth from the file's outer-
@@ -504,9 +503,9 @@ public final class RestoreFlow {
             if !Strongbox.shared.isSnapshotLoaded,
             case .noStrongbox = UnlockCoordinatorV2.bootState() {
                 // Single-wallet restore on a fresh install: use
-                // Part 6's atomic createNewStrongboxWithInitialWallet
+                // the hardening's atomic createNewStrongboxWithInitialWallet
                 // so the strongbox + first wallet land in the same
-                // slot write. Closes UNIFIED-D004 — a power-cut
+                // slot write. Closes the durability gap — a power-cut
                 // between the historical createNewStrongbox +
                 // appendWallet pair could leave an empty-wallet
                 // strongbox the user trusted as restored.
@@ -543,7 +542,7 @@ public final class RestoreFlow {
             }
             // Update the current-wallet pointer so the wallets list
             // / main strip / Receive screen open to the imported
-            // wallet without a relaunch. Throwing setter (Part 5);
+            // wallet without a relaunch. Throwing setter;
             // a flush failure here downgrades to "next launch opens
             // the previous wallet" — recoverable, not fatal.
             do {

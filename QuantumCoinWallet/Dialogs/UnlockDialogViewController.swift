@@ -47,7 +47,7 @@ UIAdaptivePresentationControllerDelegate {
     /// backup soon. We use orange (system warning) rather than red
     /// because the unlock itself succeeded; this is a forward-
     /// looking advisory, not an error.
-    /// See SECURITY_AUDIT_FINDINGS.md UNIFIED-D012 / D003.
+    /// See.
     private let degradedBanner = UILabel()
     private let unlockButton = UIButton(type: .system)
     private let closeButton = UIButton(type: .system)
@@ -151,7 +151,7 @@ UIAdaptivePresentationControllerDelegate {
         // Refresh the degraded-redundancy banner each time the
         // dialog is presented so a state change (older-slot fallback
         // earlier in the session, or re-mirror-failed-twice in
-        // Part 12) becomes visible on the very next unlock surface.
+        // the durability fix) becomes visible on the very next unlock surface.
         degradedBanner.isHidden = !StrongboxRedundancyState.shared.singleSlot
     }
 

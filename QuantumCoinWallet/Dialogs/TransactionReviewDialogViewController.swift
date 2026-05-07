@@ -19,7 +19,7 @@
 // Type I agree to confirm:
 // <text field>
 // [ Cancel ] [ OK ]
-// Audit-grade notes for AI reviewers and human auditors:
+// design notes for reviewers:
 // The dialog is the user's last user-comprehensible chance to
 // abort a transaction before scrypt unlocks the strongbox and a key
 // binds the signature. The hardening that survives in this build:
@@ -64,6 +64,16 @@ public final class TransactionReviewDialogViewController: ModalDialogViewControl
     public var onCancel: (() -> Void)?
 
     private let assetText: String
+    /// Dedicated contract-address row payload. `nil` for
+    /// native sends so the dialog suppresses the row entirely.
+    /// Held alongside `assetText` (which now carries ONLY the
+    /// symbol/name pair) so the user has a clearly-labelled
+    /// "Contract address:" row to compare against the
+    /// vendor-published address - rather than re-reading a hex
+    /// blob appended at the bottom of the asset value field
+    /// where it could be mistaken for a continuation of the
+    /// token name.
+    private let assetContract: String?
     private let fromAddress: String
     private let toAddress: String
     private let amountText: String
@@ -75,12 +85,14 @@ public final class TransactionReviewDialogViewController: ModalDialogViewControl
     private let okButton = GreenPillButton(type: .system)
 
     public init(asset: String,
+        assetContract: String? = nil,
         fromAddress: String,
         toAddress: String,
         amount: String,
         networkName: String,
         chainId: Int) {
         self.assetText = asset
+        self.assetContract = assetContract
         self.fromAddress = fromAddress
         self.toAddress = toAddress
         self.amountText = amount
@@ -102,6 +114,22 @@ public final class TransactionReviewDialogViewController: ModalDialogViewControl
             header: L.getWhatIsBeingSentByLangValues(),
             value: assetText,
             mono: false)
+        // Dedicated contract row: rendered ONLY when the
+        // user is sending a token (native sends carry `nil` here).
+        // Mono-spaced + char-wrapping so the full 64+2 hex is
+        // visible without truncation, the same chrome the
+        // From/To address rows use. The label is distinct from
+        // the asset symbol/name row above so the user can do a
+        // bytewise compare against the vendor-published address.
+        let contractSection: UIStackView? = {
+            guard let contract = assetContract, !contract.isEmpty else {
+                return nil
+            }
+            return makeSection(
+                header: L.getContractAddressByLangValues(),
+                value: contract,
+                mono: true)
+        }()
         let fromSection = makeSection(
             header: L.getFromAddressByLangValues() + ":",
             value: fromAddress,
@@ -175,16 +203,19 @@ public final class TransactionReviewDialogViewController: ModalDialogViewControl
         buttonRow.alignment = .center
         buttonRow.distribution = .fill
 
-        let stack = UIStackView(arrangedSubviews: [
-                prompt,
-                assetSection,
-                fromSection,
-                toSection,
-                amountSection,
-                networkSection,
-                agreeStack,
-                buttonRow
-            ])
+        // Insert the contract row immediately after the
+        // asset row so the user reads symbol/name first, then the
+        // exact contract bytes, and only then moves on to the
+        // From/To/amount rows. Sections nil-coalesce to an empty
+        // hidden view so the layout stays stable for native sends.
+        var sections: [UIView] = [prompt, assetSection]
+        if let contractSection = contractSection {
+            sections.append(contractSection)
+        }
+        sections.append(contentsOf: [fromSection,
+            toSection, amountSection, networkSection,
+            agreeStack, buttonRow])
+        let stack = UIStackView(arrangedSubviews: sections)
         stack.axis = .vertical
         stack.alignment = .fill
         stack.spacing = 12
@@ -237,8 +268,8 @@ public final class TransactionReviewDialogViewController: ModalDialogViewControl
         v.font = mono
         ? UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         : Typography.body(14)
-        // (audit-grade notes for AI reviewers and human auditors):
-        // mono branch renders the destination address in
+        // (notes for reviewers):
+// mono branch renders the destination address in
         // a transaction-review confirmation dialog. Previously this
         // was capped at `numberOfLines = 2` with `.byTruncatingMiddle`,
         // so at large Dynamic Type sizes (Accessibility XXL) and on

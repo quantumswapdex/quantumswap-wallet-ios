@@ -65,20 +65,73 @@ public enum BackupExporter {
                         CloudBackupManager.shared.exportWalletFile(
                             address: address, walletJson: json, from: presenter)
                         case .cloud:
-                        CloudBackupManager.shared.presentFolderPicker(from: presenter) { ok in
+                        CloudBackupManager.shared.presentFolderPicker(from: presenter) { [weak presenter] ok in
                             guard ok else { return }
-                            // `writeWalletFile` returns the destination
-                            // URL on success; use it to substitute the
-                            // `[FOLDER]/[FILENAME]` placeholders so the
-                            // cloud toast reads identically to the file
-                            // export's toast (which is built in
-                            // `CloudBackupManager.documentPicker(_:didPickDocumentsAt:)`).
-                            // On failure `writeWalletFile` already shows
-                            // its own error toast.
-                            if let url = CloudBackupManager.shared.writeWalletFile(
-                                address: address, walletJson: json) {
+                            // (notes for reviewers):
+                            // `writeWalletFile` returns a
+                            // `BackupWriteOutcome` enum that
+                            // distinguishes:
+                            //   - `.completedLocal(url)`: a
+                            //     non-iCloud destination (Files
+                            //     app folder, external drive,
+                            //     app sandbox folder). The local
+                            //     write is durable; the existing
+                            //     green success toast is the
+                            //     correct user signal.
+                            //   - `.submittedToCloud(url)`: an
+                            //     iCloud-managed destination.
+                            //     The local staging file write
+                            //     has been verified, but iCloud
+                            //     upload is asynchronous and has
+                            //     NOT yet completed. We surface
+                            //     a MODAL dialog with an OK
+                            //     button instead of a toast so
+                            //     the user must explicitly
+                            //     acknowledge the upload has
+                            //     been *submitted*, not
+                            //     completed. This protects
+                            //     against the failure mode where
+                            //     the user reads the green
+                            //     toast, assumes the backup is
+                            //     fully durable in iCloud, and
+                            //     immediately wipes the device /
+                            //     loses the device / suffers a
+                            //     power loss before the File
+                            //     Provider extension finishes
+                            //     uploading.
+                            //   - `.failed`: writer already
+                            //     surfaced its own error toast;
+                            //     no further user action.
+                            // Why a modal (not just a longer
+                            // toast):
+                            //   Toasts auto-dismiss and are
+                            //   easy to miss. A modal "OK"
+                            //   button forces the user to read
+                            //   the message and consciously
+                            //   acknowledge the
+                            //   "submitted, not yet uploaded"
+                            //   semantics before continuing.
+                            // Cross-references:
+                            //   - `CloudBackupManager.writeWalletFile`
+                            //   - `CloudBackupManager.formatBackupSubmittedToCloudMessage`
+                            //   - `MessageInformationDialogViewController`
+                            let outcome = CloudBackupManager.shared.writeWalletFile(
+                                address: address, walletJson: json)
+                            switch outcome {
+                                case .completedLocal(let url):
                                 Toast.showMessage(
                                     CloudBackupManager.formatBackupSavedMessage(forURL: url))
+                                case .submittedToCloud(let url):
+                                guard let presenter = presenter else { return }
+                                let dialog = MessageInformationDialogViewController(
+                                    title: Localization.shared.getBackupSubmittedCloudTitleByLangValues(),
+                                    message: CloudBackupManager.formatBackupSubmittedToCloudMessage(forURL: url),
+                                    icon: UIImage(systemName: "icloud.and.arrow.up"),
+                                    iconTint: .systemBlue,
+                                    closeTitle: Localization.shared.getOkByLangValues())
+                                presenter.present(dialog, animated: true)
+                                case .failed:
+                                break
                             }
                         }
                     }

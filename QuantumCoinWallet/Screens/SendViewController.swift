@@ -56,6 +56,21 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
     private let networkHeaderLabel = UILabel()
     private let networkValueLabel = UILabel()
 
+    /// Toggle row that decides whether the asset picker
+    /// surfaces `RecognizedTokens`-only entries (default off) or
+    /// also includes unrecognized but non-impersonator tokens
+    /// (toggle on). The row is hidden entirely on accounts whose
+    /// post-impersonator-filter list contains no unrecognized
+    /// tokens, so the user is never asked to make a meaningless
+    /// choice.
+    private let unrecognizedToggleLabel = UILabel()
+    private let unrecognizedToggleSwitch = UISwitch()
+    /// Stack view that aggregates the toggle label and the
+    /// switch into a single horizontal row. Held as a stored
+    /// property so visibility toggling (and dynamic re-insertion
+    /// in the parent stack) can address the row as a unit.
+    private let unrecognizedToggleRow = UIStackView()
+
     private let assetLabel = UILabel()
     /// Pull-down dropdown. Tapping it presents a `UIMenu` with the
     /// native coin and the wallet's tokens, mirroring Android's
@@ -95,10 +110,23 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
 
     // MARK: - State
 
+    /// Post-impersonator-filter snapshot of the wallet's tokens.
+    /// Stablecoin-impersonator tokens are removed at ingest in
+    /// `loadTokens`, so this list NEVER contains entries that
+    /// could mimic a USD-pegged stablecoin's symbol or name
+    /// unless their contract is in `RecognizedTokens.all`. The
+    /// "Show Unrecognized Tokens" toggle merely partitions the
+    /// already-filtered list.
     private var tokens: [AccountTokenSummary] = []
     /// `nil` when the native coin is selected, otherwise the contract
     /// address of the token that drives `sendTokenTransaction`.
     private var selectedTokenContract: String?
+    /// Toggle state. When `false` (default), the asset
+    /// picker shows only recognized tokens (plus the native coin
+    /// row). When `true`, the picker also surfaces unrecognized
+    /// tokens. The toggle has no effect on the impersonator
+    /// filter that runs at ingest time.
+    private var showUnrecognizedTokens: Bool = false
     /// Cancellable debounced async validator for the address field.
     /// Reset on every text change; the in-flight task short-circuits
     /// if the trimmed text changed in the meantime.
@@ -147,6 +175,36 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         networkRow.axis = .horizontal
         networkRow.spacing = 6
         networkRow.alignment = .firstBaseline
+
+        // "Show Unrecognized Tokens" row. Sits ABOVE the
+        // "What is being sent?" label so the user sees and acts
+        // on the toggle BEFORE making a selection - matching the
+        // top-to-bottom reading order of the form. Hidden whenever
+        // the post-impersonator-filter token list contains no
+        // unrecognized tokens (`refreshUnrecognizedToggleVisibility`).
+        unrecognizedToggleLabel.text = L.getShowUnrecognizedTokensByLangValues()
+        unrecognizedToggleLabel.font = Typography.mediumLabel(14)
+        unrecognizedToggleLabel.textColor = UIColor(named: "colorCommon6") ?? .label
+        unrecognizedToggleLabel.numberOfLines = 0
+
+        unrecognizedToggleSwitch.isOn = showUnrecognizedTokens
+        unrecognizedToggleSwitch.addTarget(self,
+            action: #selector(toggleUnrecognized),
+            for: .valueChanged)
+
+        unrecognizedToggleRow.axis = .horizontal
+        unrecognizedToggleRow.alignment = .center
+        unrecognizedToggleRow.spacing = 8
+        let toggleSpacer = UIView()
+        toggleSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        unrecognizedToggleRow.addArrangedSubview(unrecognizedToggleLabel)
+        unrecognizedToggleRow.addArrangedSubview(toggleSpacer)
+        unrecognizedToggleRow.addArrangedSubview(unrecognizedToggleSwitch)
+        // Default-hidden until `loadTokens` resolves: surfacing
+        // the row before we know whether the wallet has any
+        // unrecognized tokens would be a flicker on the cold
+        // path.
+        unrecognizedToggleRow.isHidden = true
 
         // 5) "What is being sent?" label.
         assetLabel.text = L.getWhatIsBeingSentByLangValues()
@@ -319,6 +377,7 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
                 titleLabel,
                 divider,
                 networkRow,
+                unrecognizedToggleRow,
                 assetLabel,
                 assetPicker,
                 assetSelectedLabel,
@@ -337,6 +396,7 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         stack.setCustomSpacing(8, after: titleLabel)
         stack.setCustomSpacing(12, after: divider)
         stack.setCustomSpacing(12, after: networkRow)
+        stack.setCustomSpacing(8, after: unrecognizedToggleRow)
         stack.setCustomSpacing(4, after: assetLabel)
         stack.setCustomSpacing(4, after: assetPicker)
         stack.setCustomSpacing(14, after: assetSelectedLabel)
@@ -391,8 +451,19 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
 
     /// Rebuilds the `assetPicker.menu` from the current `tokens`
     /// snapshot and the `selectedTokenContract`. Re-called whenever
-    /// the wallet selection changes or `loadTokens` returns fresh
-    /// data so the checkmark on the active row stays correct.
+    /// the wallet selection changes, `loadTokens` returns fresh
+    /// data, or the anti-impersonation "Show Unrecognized Tokens" toggle flips
+    /// so the checkmark on the active row stays correct.
+    ///
+    /// Filtering rules (post-impersonator-filter input):
+    /// - Native QuantumCoin always appears as the first row.
+    /// - Tokens whose contract is in `RecognizedTokens.all` always
+    ///   appear after the native row.
+    /// - Tokens whose contract is NOT in `RecognizedTokens.all`
+    ///   appear ONLY when the user has flipped the
+    ///   "Show Unrecognized Tokens" switch ON.
+    /// Stablecoin-impersonator tokens never reach this method
+    /// (they were dropped at ingest in `loadTokens`).
     private func rebuildAssetMenu() {
         let nativeAction = UIAction(
             title: nativeAssetTitle(),
@@ -402,6 +473,10 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         }
         var actions: [UIAction] = [nativeAction]
         for token in tokens {
+            if !showUnrecognizedTokens
+                && !RecognizedTokens.isRecognized(token.contractAddress) {
+                continue
+            }
             let label = Self.formatTokenLabel(token)
             let contract = token.contractAddress
             let state: UIMenuElement.State =
@@ -412,6 +487,43 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         }
         assetPicker.menu = UIMenu(title: Localization.shared.getWhatIsBeingSentByLangValues(),
             children: actions)
+    }
+
+    /// Toggle handler. Updates the in-memory flag, rebuilds
+    /// the menu, and clamps the current selection back to the
+    /// native coin if the previously-selected token is now hidden
+    /// by the new toggle state. Without the clamp, a user who had
+    /// picked an unrecognized token and then turned the toggle
+    /// OFF would see a stale row in the picker chrome with no
+    /// matching menu entry to deselect from.
+    @objc private func toggleUnrecognized() {
+        showUnrecognizedTokens = unrecognizedToggleSwitch.isOn
+        if let contract = selectedTokenContract,
+           !showUnrecognizedTokens,
+           !RecognizedTokens.isRecognized(contract) {
+            applyAssetSelection(contract: nil)
+        } else {
+            rebuildAssetMenu()
+        }
+    }
+
+    /// Hide the toggle row entirely on accounts where every
+    /// post-impersonator-filter token is recognized (or the wallet
+    /// has no tokens at all). Without this gating, the toggle
+    /// would surface as a control whose two states produce
+    /// identical menus - confusing UX.
+    private func refreshUnrecognizedToggleVisibility() {
+        let hasUnrecognized = tokens.contains { tok in
+            !RecognizedTokens.isRecognized(tok.contractAddress)
+        }
+        unrecognizedToggleRow.isHidden = !hasUnrecognized
+        if !hasUnrecognized && showUnrecognizedTokens {
+            // The toggle is going away; reset the underlying flag
+            // so a future load that DOES surface unrecognized
+            // tokens starts in the safe-default OFF state.
+            showUnrecognizedTokens = false
+            unrecognizedToggleSwitch.setOn(false, animated: false)
+        }
     }
 
     /// Apply the new selection: switch the dropdown title, refresh
@@ -449,15 +561,29 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
     }
 
     /// Plain-language description of the asset for the review dialog.
-    /// Native -> "QuantumCoin"; tokens -> "SYMBOL (NAME)\n<contract>"
-    /// so the user sees both the friendly label AND the contract
-    /// address they're trusting.
+    /// Native -> "QuantumCoin"; tokens -> "SYMBOL (NAME)" only.
+    /// The contract address is now rendered in a SEPARATE labelled
+    /// row of the review dialog (`Contract address:`); appending
+    /// it here would double-render the same hex inside the asset
+    /// row and the dedicated contract row.
     private func currentAssetReviewText() -> String {
         if let contract = selectedTokenContract,
         let token = tokens.first(where: { $0.contractAddress == contract }) {
-            return Self.formatTokenLabel(token) + "\n" + contract
+            return Self.formatTokenLabel(token)
         }
         return nativeAssetTitle()
+    }
+
+    /// Returns the contract address that should be shown in the
+    /// Dedicated "Contract address:" row of the review
+    /// dialog. Returns `nil` for native sends so the review dialog
+    /// suppresses the row entirely.
+    private func currentAssetContractAddress() -> String? {
+        guard let contract = selectedTokenContract,
+              tokens.contains(where: { $0.contractAddress == contract }) else {
+            return nil
+        }
+        return contract
     }
 
     // MARK: - Networking
@@ -468,13 +594,22 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         Task { [weak self] in
             do {
                 let resp = try await AccountsApi.accountTokens(address: address, pageIndex: 1)
-                let fetched = resp.result ?? []
+                // Anti-impersonation chokepoint: stablecoin-impersonator
+                // tokens are dropped BEFORE the result is
+                // assigned to `self.tokens`. Recognized
+                // contracts pass through the filter even when
+                // their name happens to match a pattern.
+                let fetched = StablecoinImpersonatorFilter.filter(
+                    resp.result ?? [])
                 await MainActor.run {
                     guard let self = self else { return }
                     self.tokens = fetched
+                    self.refreshUnrecognizedToggleVisibility()
                     // Drop the current selection if the token list no
                     // longer carries the contract we'd selected (e.g.
-                    // network swap, tokens list refreshed away).
+                    // network swap, tokens list refreshed away,
+                    // impersonator filter excluded the previously-
+                    // chosen entry).
                     if let c = self.selectedTokenContract,
                     !fetched.contains(where: { $0.contractAddress == c }) {
                         self.applyAssetSelection(contract: nil)
@@ -523,8 +658,13 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
 
     @objc private func handleNetworkConfigDidChange() {
         // Drop the local token cache + selection so a stale list from
-        // a different chain never leaks onto the new chain.
+        // a different chain never leaks onto the new chain. Also
+        // hide the unrecognized-tokens toggle until `loadTokens` resolves on
+        // the new network so the user does not see a stale toggle
+        // state that does not correspond to the new chain's
+        // tokens.
         tokens = []
+        unrecognizedToggleRow.isHidden = true
         applyAssetSelection(contract: nil)
         loadTokens()
         refreshNetworkValueLabel()
@@ -632,8 +772,8 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         }
         scanner.onScan = { [weak self, weak scanner] payload in
             scanner?.dismiss(animated: true) {
-                // (audit-grade notes for AI reviewers and human
-                // auditors): single source of truth for
+                // (notes for reviewers):
+// single source of truth for
                 // "is this an address?" is the QuantumCoin SDK
                 // call (`bridge.isValidAddress`), not the local
                 // `QuantumCoinAddress.isValid` regex. The
@@ -677,9 +817,7 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
     /// QuantumCoin address suitable for the To field. Returns
     /// `nil` if the payload cannot be reduced to a valid
     /// address shape.
-    /// Accepted inputs (audit-grade notes for AI reviewers and
-    /// human auditors):
-    /// 1. `quantumcoin:<0x 64-hex>` (canonical shape emitted
+    /// Accepted inputs (notes for reviewers):/// /// 1. `quantumcoin:<0x 64-hex>` (canonical shape emitted
     /// by this build's ReceiveViewController). The scheme
     /// is matched case-insensitively.
     /// 2. `quantumcoin:<0x 64-hex>?<query>` - the query
@@ -710,8 +848,7 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
     /// from a current build before this Send screen will
     /// accept it. That is a deliberate sharp edge, not an
     /// oversight - see the rejection rationale above.
-    /// (audit-grade notes for AI reviewers and human
-    /// auditors): the QR-scan callback above performs the SDK
+    /// (notes for reviewers):/// the QR-scan callback above performs the SDK
     /// validation step on the candidate returned from this
     /// helper. This helper itself is intentionally
     /// validation-free: it ONLY parses the QR payload shape
@@ -882,8 +1019,8 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
     // MARK: - Send pipeline
 
     @objc private func tapSend() {
-        // (audit-grade notes for AI reviewers and human auditors):
-        // the validation order is intentional and audit-significant.
+        // (notes for reviewers):
+// the validation order is intentional and design-significant.
         //   1. Address non-empty + SDK `isValidAddressAsync` shape
         //      check FIRST. The SDK is the canonical source of
         //      "is this an address?" - a synchronous regex prefilter
@@ -991,7 +1128,7 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
     /// ERC-20-style token transfer (which leaves headroom for
     /// the contract's `transfer(address,uint256)` and event
     /// emission).
-    /// Audit-grade rationale (AI reviewers and human auditors):
+    /// design rationale (reviewers:
     /// * Hardcoded - not estimated. The wallet does NOT call
     /// a remote provider's `eth_estimateGas` or `getFeeData`.
     /// A live estimate would force the review dialog to wait
@@ -1012,7 +1149,7 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
     private func presentReviewDialog(to: String, amount: String) {
         let from = currentAddress()
         let networkName = BlockchainNetworkManager.shared.active?.name ?? ""
-        // (audit-grade notes):
+        // (notes):
         // capture the active network snapshot AND the From-address
         // at the moment the user taps Review. Both values are
         // forwarded through the unlock + submit pipeline and
@@ -1025,7 +1162,7 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         // values the user CONFIRMED, not whatever happens to be
         // active when scrypt finishes.
         // Use the synchronous mirror `NetworkConfig.currentSync`
-        // here (added by the UNIFIED-007 fix) so the snapshot
+        // here (added by the related race-condition fix) so the snapshot
         // capture happens at the SAME runloop tick as the
         // `BlockchainNetworkManager.shared.active?.name` read above.
         // The previous shape captured via `await NetworkConfig.shared.current`
@@ -1041,8 +1178,8 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         let captured = NetworkConfig.currentSync
         let capturedFrom = from
         Task { [weak self] in
-            // (audit-grade notes for AI reviewers and human auditors):
-            // the TO checksum MUST come from the SDK or the
+            // (notes for reviewers):
+// the TO checksum MUST come from the SDK or the
             // dialog MUST NOT render. A silent fallback to the
             // raw lowercased form would show the recipient as a
             // visually-correct-looking address that the user cannot
@@ -1082,6 +1219,7 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
                 guard let self = self else { return }
                 let dlg = TransactionReviewDialogViewController(
                     asset: self.currentAssetReviewText(),
+                    assetContract: self.currentAssetContractAddress(),
                     fromAddress: fromChecksum,
                     toAddress: toChecksum,
                     amount: amount,
@@ -1171,8 +1309,8 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
             Task.detached(priority: .userInitiated) {
                 [weak self, weak dlg, weak wait, selectedTokenContract, weiAmount] in
                 // Phase 1 - decrypt
-                // (audit-grade notes for AI reviewers and human
-                // auditors): the decrypted private/public key
+                // (notes for reviewers):
+// the decrypted private/public key
                 // bytes flow through the binary channel; we
                 // hold them as `Data` so the `defer { resetBytes }`
                 // pattern actually wipes the bytes after signing.
@@ -1194,8 +1332,8 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
                     // the same user password as `passwordWrap`,
                     // so an unlimited oracle here would defeat
                     // the strongbox unlock dialog's lockout).
-                    // (audit-grade notes for AI reviewers and
-                    // human auditors): this `decryptWalletJson`
+                    // (notes for reviewers):
+// this `decryptWalletJson`
                     // call is wrapped in
                     // `UnlockCoordinatorV2.runRateLimited(...)`
                     // so the shared `UnlockAttemptLimiter` gates
@@ -1215,8 +1353,8 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
                         try JsBridge.shared.decryptWalletJson(
                             walletJson: encrypted, password: pw)
                     }
-                    // (audit-grade notes for AI reviewers and
-                    // human auditors): the decrypted envelope
+                    // (notes for reviewers):
+// the decrypted envelope
                     // MUST belong to the wallet the
                     // user reviewed and confirmed in the
                     // transaction-review dialog. If a stale or
@@ -1272,8 +1410,8 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
 
                 // Phase 2 - submit
                 do {
-                    // (audit-grade
-                    // notes for AI reviewers and human auditors):
+                    // (design
+                    // notes for reviewers:
                     // re-assert the captured network snapshot AND
                     // the captured From-address against current
                     // state BEFORE the bridge signs the transaction.

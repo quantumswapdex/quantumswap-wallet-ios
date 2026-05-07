@@ -15,8 +15,8 @@
 // app/src/main/java/com/quantumcoinwallet/app/model/BlockchainNetwork.java
 // app/src/main/java/com/quantumcoinwallet/app/utils/GlobalMethods.java (setActiveNetwork)
 //
-// Concurrency discipline (Part 1 of the security fix plan, closes
-// UNIFIED-006 / UNIFIED-D009):
+// Concurrency discipline (the hardening of the security fix plan, closes
+// the prior race / durability gaps):
 // `BlockchainNetworkManager` mirrors the NSLock + private-storage
 // pattern used by `Utilities/Constants.swift` for the legacy
 // `SCAN_API_URL` / `RPC_ENDPOINT_URL` / `BLOCK_EXPLORER_URL` /
@@ -28,7 +28,7 @@
 // is the SINGLE publish point that fans the new snapshot out to
 // `Constants.*`, `ApiClient.basePath`, and `NetworkConfig.publishSync`
 // in the same critical section so all four observation surfaces see
-// the same epoch (closing UNIFIED-007 in concert with
+// the same epoch (closing a prior race condition in concert with
 // `Networking/NetworkConfig.swift`'s synchronous mirror).
 
 import Foundation
@@ -141,9 +141,7 @@ public struct BlockchainNetwork: Codable, Equatable, Sendable {
     /// scheme so the rest of the iOS stack (`ApiClient.basePath`,
     /// `Constants.SCAN_API_URL`, block-explorer deeplinks) keeps
     /// working.
-    /// hardening (audit-grade notes for AI reviewers
-    /// and human auditors):
-    /// The entry-form validator (`BlockchainNetworkViewController
+    /// hardening (notes for reviewers): /// The entry-form validator (`BlockchainNetworkViewController
     /// .isValidScanLikeDomain`) rejects `http://` outright as the
     /// primary gate. This model-layer transform is a defense-in-depth
     /// floor: if any code path EVER manages to flow an `http://` URL
@@ -213,8 +211,8 @@ public final class BlockchainNetworkManager: @unchecked Sendable {
     //   (drop the lock around the slow work + rollback dance) re-opens
     //   the race that this fix exists to close.
     // Cross-references:
-    //   - SECURITY_AUDIT_FINDINGS.md UNIFIED-006 (data race on
-    //     `(networks, activeIndex)`) and UNIFIED-D009 (compound mutation
+    //   - (data race on
+    //     `(networks, activeIndex)`) and a prior durability gap (compound mutation
     //     race specifically for double-tap "Add Network" sequences).
     //   - `QuantumCoinWallet/Utilities/Constants.swift` for the matching
     //     `_networkLock` + private backing pattern that this code mirrors.
@@ -300,7 +298,7 @@ public final class BlockchainNetworkManager: @unchecked Sendable {
     /// before invoking this method. The in-memory `_activeIndex` is
     /// rolled back if the persist fails so a wrong-password retry
     /// doesn't desync memory from disk.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the `_stateLock` is held across the entire mutation pipeline
     /// INCLUDING the rollback-on-throw branch. Without this, a
     /// concurrent reader could observe the half-rolled-back state
@@ -309,7 +307,7 @@ public final class BlockchainNetworkManager: @unchecked Sendable {
     /// epoch). The slow `persistThroughStrongbox` runs while the
     /// lock is held; this is intentional - serialising mutators is
     /// the point of the fix. See class header for the cross-reference
-    /// to UNIFIED-006 / UNIFIED-D009.
+    /// to the prior race / durability gaps.
     public func setActive(index: Int, password: String,
         onPhase: UnlockCoordinatorV2.WriteVerifyPhaseCallback? = nil) throws {
         _stateLock.lock()
@@ -334,7 +332,7 @@ public final class BlockchainNetworkManager: @unchecked Sendable {
     /// persist failure the new entry is rolled back so the in-memory
     /// `_networks` list stays in lock-step with disk, allowing the user
     /// to retry the unlock prompt without duplicating the entry.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the `_stateLock` is held across `_networks.append` AND the
     /// rollback `removeLast` so a concurrent reader cannot witness
     /// a duplicated trailing entry. A double-tap on the "Save" button
@@ -401,7 +399,7 @@ public final class BlockchainNetworkManager: @unchecked Sendable {
     /// password to `UnlockCoordinatorV2.replaceNetworks` for the
     /// actual derive-encrypt-write cycle.
     /// PRECONDITION: `_stateLock` MUST be held by the caller. The
-    /// `Locked` suffix is the audit convention for "method assumes
+    /// `Locked` suffix is the design convention for "method assumes
     /// the enclosing lock is held"; cross-checked by code review.
     /// Reads `_networks` and `_activeIndex` directly so it does not
     /// re-enter the lock through the public computed accessors.
@@ -416,7 +414,7 @@ public final class BlockchainNetworkManager: @unchecked Sendable {
 
     /// PRECONDITION: `_stateLock` MUST be held by the caller. Renamed
     /// from `applyActive()` to reflect the held-lock contract.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// this method publishes the new network into THREE sinks in the
     /// same critical section so a synchronous reader cannot observe
     /// a torn view (Constants says new network, NetworkConfig still
@@ -424,14 +422,14 @@ public final class BlockchainNetworkManager: @unchecked Sendable {
     ///   1. `Constants.*` mirrors (lock-protected via NSLock inside
     ///      Constants for legacy synchronous UI readers).
     ///   2. `ApiClient.basePath` (lock-protected via the new accessor
-    ///      added in Part 1b).
+    ///      added in the hardening).
     ///   3. `NetworkConfig.publishSync(...)` synchronous mirror added
-    ///      in Part 1c (the canonical synchronous source that the
+    ///      in the hardening (the canonical synchronous source that the
     ///      signing-path "Review" capture in SendViewController uses).
     /// The asynchronous `Task { await NetworkConfig.shared.apply }`
     /// is RETAINED for any future async consumer; the actor remains
     /// the canonical async source. The static synchronous mirror
-    /// closes UNIFIED-007 (capture-time torn view between actor and
+    /// closes the race (capture-time torn view between actor and
     /// Constants).
     private func applyActiveLocked() {
         guard _activeIndex >= 0 && _activeIndex < _networks.count else { return }
@@ -448,7 +446,7 @@ public final class BlockchainNetworkManager: @unchecked Sendable {
             rpcEndpoint: net.rpcEndpoint,
             scanApiUrl: net.scanApiDomain,
             blockExplorerUrl: net.blockExplorerUrl)
-        // SYNCHRONOUS publish - closes UNIFIED-007. Any caller that
+        // SYNCHRONOUS publish - closes the race. Any caller that
         // reads `NetworkConfig.currentSync` immediately after this
         // returns observes the same epoch as `Constants.*` and
         // `ApiClient.basePath` above.

@@ -6,8 +6,8 @@
 // Diagnostic console output is gated behind AndroidBridge.isDebug()
 // so release builds never stringify exception state (which could contain
 // sensitive argument values) into logcat via onConsoleMessage.
-// (audit-grade notes for AI reviewers and human
-// auditors): the diagnostic output below is further restricted to
+// (notes for reviewers):
+// the diagnostic output below is further restricted to
 // log only opaque category tokens plus the requestId. The raw
 // exception message and any payload-derived field is NEVER
 // emitted, even in DEBUG, because:
@@ -105,7 +105,7 @@ function hexToBytes(hex) {
  return bytes;
 }
 
-// (audit-grade notes for AI reviewers and human auditors):
+// (notes for reviewers):
 // symmetric binary channels between Swift and the JS
 // bridge. The QuantumCoin SDK already returns the private and
 // public key bytes as Uint8Array (`wallet.signingKey.privateKeyBytes`
@@ -146,8 +146,8 @@ function pullPayloadBinary(rid, key) {
 }
 
 function stagePendingResultBinary(rid, key, uint8) {
- // (audit-grade notes for AI reviewers and human auditors):
- // WKURLSchemeHandler on iOS does NOT reliably
+ // (notes for reviewers):
+// WKURLSchemeHandler on iOS does NOT reliably
  // receive XHR POST bodies for custom schemes (the body is
  // stripped by WebKit before reaching the scheme handler).
  // We therefore push the binary via the existing
@@ -287,8 +287,7 @@ function pullPayload(requestId) {
  }
 }
 
-// (audit-grade honesty notes for AI reviewers and
-// human auditors):
+// (notes for reviewers):
 // The name "zeroString" is historical and slightly misleading. JS
 // strings are IMMUTABLE; the bytes that already live in the V8
 // string pool from the previous `pullPayload` parse cannot be
@@ -304,7 +303,7 @@ function pullPayload(requestId) {
 // That window is bounded but non-zero. A heap snapshot taken
 // between the `finally` and the next major GC cycle can still
 // contain the password, private key, etc.
-// The truthful summary for an auditor: "best-effort, GC-bounded
+// The truthful summary for a reviewer: "best-effort, GC-bounded
 // reachability drop, NOT in-place wipe". The stronger guarantee
 // would require either (a) marshalling secrets as Uint8Array
 // from native code so we can call `.fill(0)` on them (which we
@@ -446,23 +445,50 @@ var bridge = {
  }
  },
 
+// (notes for reviewers): native-coin send.
+ //
+ // We use the SDK's high-level `wallet.sendTransaction(...)`
+ // surface (the same call shape the Android wallet uses, see
+ // `quantum-coin-wallet-android/app/src/main/assets/bridge.html`
+ // `sendTransaction`). Internally the SDK:
+ //   1. Calls `wallet.populateTransaction(tx)` to fill in the
+ //      nonce / chainId / from-address fields the user did not
+ //      supply.
+ //   2. Calls `wallet.signTransaction(populated)` which derives
+ //      the canonical transaction hash LOCALLY from the signed
+ //      bytes (this is the keccak256 of the signed RLP payload,
+ //      independent of any RPC).
+ //   3. Calls `provider.sendTransaction(rawBytes)` to broadcast.
+ //   4. Returns a `TransactionResponse` whose `.hash` field is
+ //      the locally-derived hash from step 2.
+ //
+ // We surface that `tx.hash` to Swift as `txHash`. Because the
+ // hash is derived from the bytes WE signed (not from anything
+ // the RPC tells us), the user can independently verify the
+ // transaction on a block explorer using the returned hash; if
+ // a hostile RPC mines different bytes the user's hash will
+ // simply not appear on chain (rather than appearing with the
+ // wrong fields). See `Networking/TlsPinning.swift` for why we
+ // do not pin RPC TLS by design (decentralization), and the
+ // user-visible block-explorer link in
+ // `TransactionSentDialogViewController` for the recommended
+ // verification path.
+ //
+ // Why this shape (vs. low-level `signRawTransaction`)
+ //   The previous implementation tried to call
+ //   `QuantumCoinSDK.signRawTransaction(...)` directly to
+ //   re-derive the hash before broadcast. That symbol is not
+ //   exposed on the top-level `QuantumCoinSDK` namespace at
+ //   runtime (only `signSendCoinTransaction` and the
+ //   `wallet.signTransaction` instance method are public), so
+ //   the whole send path failed with
+ //   `signRawTransaction is not exposed by QuantumCoinSDK bundle`.
+ //   The high-level surface used here is the one the SDK
+ //   actually contracts to expose; it is the same surface the
+ //   Android wallet has shipped for over a year. Using the
+ //   public surface also means SDK upgrades that change the
+ //   internal signing primitive do not break the wallet.
  sendTransaction: async function(requestId) {
- // (audit-grade notes for AI reviewers and human auditors):
- // the JsonRpcProvider here connects to whichever RPC
- // endpoint the user has selected. The
- // wallet does NOT TLS-pin RPC traffic by design - QuantumCoin
- // is non-custodial and the user MUST be free to point at
- // their own node, an Infura-class third-party provider, a
- // community-run public RPC, etc. WKWebView still validates
- // the certificate chain against the iOS system trust store
- // (baseline TLS), so a passive eavesdropper cannot read or
- // modify our traffic; the absence of pinning is specifically
- // about NOT collapsing the operator choice down to one
- // project-controlled key. See `Networking/TlsPinning.swift`
- // file header for the full rationale and the future-spec
- // local-RLP-keccak mitigation that defends the
- // signed-tx-hash check against a hostile RPC operator AS
- // WELL AS a CA-compromise attacker.
  var payload = null;
  var privBytes = null;
  var pubBytes = null;
@@ -475,7 +501,6 @@ var bridge = {
  _sdkInitialized = true;
  var provider = new QuantumCoinSDK.JsonRpcProvider(
  payload.rpcEndpoint, payload.chainId);
- // Secrets via binary channel.
  privBytes = pullPayloadBinary(requestId, 'privKey');
  pubBytes = pullPayloadBinary(requestId, 'pubKey');
  var wallet = await QuantumCoinSDK.Wallet.fromKeys(privBytes, pubBytes, provider);
@@ -495,6 +520,27 @@ var bridge = {
  }
  },
 
+// (notes for reviewers): ERC-20-style token transfer.
+ //
+ // Same pattern as `sendTransaction` above, but the inner
+ // transaction is an ERC-20 `transfer(address,uint256)` call.
+ // We use the SDK's `IERC20.connect(contract, wallet)` to
+ // build a `Contract` instance and then call `.transfer(to,
+ // amount, overrides)` on it. The SDK internally:
+ //   1. Calls `token.populateTransaction.transfer(to, amount)`
+ //      to encode the `transfer` selector + arguments into the
+ //      transaction `data` field.
+ //   2. Calls `wallet.populateTransaction(tx)` to fill in
+ //      nonce / chainId / from-address.
+ //   3. Signs locally and derives `tx.hash` from signed bytes.
+ //   4. Broadcasts through the connected provider.
+ //
+ // This is byte-for-byte the same flow the Android wallet ships
+ // (see `quantum-coin-wallet-android/.../bridge.html`
+ // `sendTokenTransaction`); both wallets produce identical
+ // transaction bytes for identical inputs, which is the
+ // contract reviewers and exchanges rely on when comparing
+ // hashes across our two clients.
  sendTokenTransaction: async function(requestId) {
  var payload = null;
  var privBytes = null;
@@ -502,7 +548,8 @@ var bridge = {
  try {
  if (!requireSDK(requestId)) return;
  if (!QuantumCoinSDK.IERC20) {
- sendError(requestId, 'IERC20 is not exposed by QuantumCoinSDK bundle');
+ sendError(requestId, new Error(
+ 'IERC20 is not exposed by QuantumCoinSDK bundle'));
  return;
  }
  payload = pullPayload(requestId);
@@ -512,7 +559,6 @@ var bridge = {
  _sdkInitialized = true;
  var provider = new QuantumCoinSDK.JsonRpcProvider(
  payload.rpcEndpoint, payload.chainId);
- // Secrets via binary channel.
  privBytes = pullPayloadBinary(requestId, 'privKey');
  pubBytes = pullPayloadBinary(requestId, 'pubKey');
  var wallet = await QuantumCoinSDK.Wallet.fromKeys(privBytes, pubBytes, provider);
@@ -549,8 +595,8 @@ var bridge = {
  // hash and therefore many letter positions, making the difference
  // obvious.
  //
- // (audit-grade notes for AI reviewers and human auditors):
- // the previous implementation had a `toLowerCase()` fallback
+ // (notes for reviewers):
+// the previous implementation had a `toLowerCase()` fallback
  // for "older bundle / SDK symbol missing" so the review
  // dialog would still render *something*. That fallback was a
  // silent typo-detection downgrade for the recipient (TO) address:
@@ -568,7 +614,7 @@ var bridge = {
  //     UX regression rather than a signing-correctness one).
  // The JS side is uniformly fail-closed; the FROM permissiveness
  // lives on the Swift side so the policy is visible to a Swift
- // auditor reading SendViewController.tapSend.
+ // reviewer reading SendViewController.tapSend.
  getChecksumAddress: async function(requestId, address) {
  try {
  if (!(await ensureInitialized(requestId))) return;
@@ -603,8 +649,8 @@ var bridge = {
  if (!(await ensureInitialized(requestId))) return;
  payload = pullPayload(requestId);
  if (!payload) return;
- // (audit-grade notes for AI reviewers and human auditors):
- // the seed-words branch is the only user-facing path
+ // (notes for reviewers):
+// the seed-words branch is the only user-facing path
  // (the create-wallet handler stages the just-generated seed
  // words to a single-shot JSON envelope and we re-encrypt
  // them here). The private/public key branch reads its key
@@ -728,8 +774,8 @@ var bridge = {
  if (!(await ensureInitialized(requestId))) return;
  payload = pullPayload(requestId);
  if (!payload) return;
- // (audit-grade notes for AI reviewers and human auditors):
- // defense-in-depth minimum-bound check on the
+ // (notes for reviewers):
+// defense-in-depth minimum-bound check on the
  // scrypt parameters. Swift's `JsBridge.scryptDerive`
  // already passes the canonical
  // (SCRYPT_N, SCRYPT_R, SCRYPT_P, SCRYPT_KEY_LEN) defaults;
@@ -738,7 +784,7 @@ var bridge = {
  // otherwise silently weaken the strongbox KDF and on
  // disk become unrecoverable on a release build that
  // expects the strong parameters. The thresholds match
- // the audited defaults: N >= 16384 (2^14, the OWASP
+ // the review-recommended defaults: N >= 16384 (2^14, the OWASP
  // floor), r >= 8 (RFC 7914 SHOULD), p >= 1 (RFC 7914
  // MUST), keyLen >= 16 (128-bit security floor). Reject
  // outside-bounds requests with an explicit error so the

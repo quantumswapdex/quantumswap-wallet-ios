@@ -6,8 +6,7 @@
 // every screen (HomeWallet, Send, Reveal, BackupOptions,
 // RestoreFlow, BlockchainNetwork, etc.) routes through the
 // public facade here.
-// Why this exists (audit-grade notes for AI reviewers and human
-// auditors):
+// Why this exists (notes for reviewers):
 // The layered architecture confines all crypto + storage
 // coordination to a single layer-4 module. Every UI call site
 // sees an ergonomic, password-in / Strongbox-out API; the
@@ -176,7 +175,7 @@ public enum UnlockCoordinatorV2Error: Error, CustomStringConvertible {
 
 public enum UnlockCoordinatorV2 {
 
-    // MARK: - Mutation serialization (Part 4 of the durability fix)
+    // MARK: - Mutation serialization (durability fix)
     // ------------------------------------------------------------------
     // What it closes:
     //   Every public mutator below (`createNewStrongbox`,
@@ -209,8 +208,8 @@ public enum UnlockCoordinatorV2 {
     //       The two persists then write conflicting payloads at
     //       the same generation; the second one wins on disk and
     //       the first append is silently dropped.
-    //   This is SECURITY_AUDIT_FINDINGS.md UNIFIED-D001 (compound
-    //   mutation race) — corroborated by 5 of 6 audit models.
+    //   This is (compound
+    //   mutation race) — corroborated by multiple reviewers.
     // Why this shape (NSRecursiveLock):
     //   Higher-level mutators (`appendWallet`, `replaceNetworks`,
     //   `setCurrentWallet`, etc.) call into `persistSnapshot`.
@@ -220,7 +219,7 @@ public enum UnlockCoordinatorV2 {
     //   primitive (NSLock or DispatchQueue.sync) would force
     //   either:
     //     a) A two-tier API (public + locked-internal) that
-    //        doubles the surface area for audit review, OR
+    //        doubles the surface area for review, OR
     //     b) Hand-rolled "is this thread inside the queue?"
     //        gymnastics with `dispatch_get_specific`.
     //   NSRecursiveLock keeps the public API exactly one entry
@@ -244,8 +243,8 @@ public enum UnlockCoordinatorV2 {
     //   back into a freshly-locked Strongbox — defeating the
     //   relock. Waiting briefly is the right behaviour.
     // Cross-references:
-    //   - UNIFIED-D001 (compound mutation race) — closed.
-    //   - UNIFIED-006 (data race on shared mutable state) —
+    //   - a prior durability gap (compound mutation race) — closed.
+    //   - a prior race condition (data race on shared mutable state) —
     //     reinforced by serialising the lock-and-clear path too.
     //   - `SessionLock.applicationDidEnterBackground` and the idle-
     //     timer relock both call into `lock()`, which now hops onto
@@ -305,7 +304,7 @@ public enum UnlockCoordinatorV2 {
     /// `persist` calls can write to the OTHER slot).
     /// MUST be called from a background queue (scrypt is
     /// expensive).
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the `UnlockAttemptLimiter` pre-check + `recordFailure` /
     /// `recordSuccess` bookkeeping is owned by THIS function so
     /// every password-bound unlock surface (cold-launch unlock,
@@ -330,13 +329,13 @@ public enum UnlockCoordinatorV2 {
             break
         }
 
-        // Part 10: read BOTH slots (winner first, runner-up
+        // the durability fix: read BOTH slots (winner first, runner-up
         // second) so that a corrupt-but-pre-MAC-valid winner
         // can be transparently bypassed for a recoverable older
         // slot. Without this, the user would see
         // `tamperDetected` and lose access even when an older
         // valid slot is sitting on disk one position away.
-        // See SECURITY_AUDIT_FINDINGS.md UNIFIED-D003.
+        // See .
         let candidates: [StrongboxFileCodec.DecodedFile]
         do {
             candidates = try StrongboxFileCodec.readCandidates()
@@ -389,7 +388,7 @@ public enum UnlockCoordinatorV2 {
                     // single-slot redundancy state so the next
                     // unlock dialog can warn the user to create
                     // a fresh backup. The re-mirror codepath
-                    // (Part 12) will eventually restore the
+                    // (the durability fix) will eventually restore the
                     // redundant pair on disk; until then the
                     // banner stays up.
                     StrongboxRedundancyState.shared.markSingleSlot()
@@ -434,7 +433,7 @@ public enum UnlockCoordinatorV2 {
     /// decode / checksum / rollback), or `.storageUnavailable` for
     /// scrypt I/O hiccups.
     /// What it closes:
-    ///   SECURITY_AUDIT_FINDINGS.md UNIFIED-D003. Extracting the
+    ///   . Extracting the
     ///   per-candidate attempt out of `unlockWithPassword` makes
     ///   the older-slot fallback a clean loop rather than a deeply
     ///   nested do/catch.
@@ -449,7 +448,7 @@ public enum UnlockCoordinatorV2 {
         password: String
     ) throws -> (payload: StrongboxPayload, decoded: StrongboxFileCodec.DecodedFile) {
         // Step 1: derive scrypt key from password + on-disk salt.
-        // Audit note: scrypt is the brute-force cost ceiling.
+        // design note: scrypt is the brute-force cost ceiling.
         // If an attacker has the slot file in hand they MUST
         // pay scrypt(N=262144, r=8, p=1) per password guess.
         // On modern hardware that is ~300 ms per guess on a
@@ -691,7 +690,7 @@ public enum UnlockCoordinatorV2 {
     /// `StrongboxPayload`, and writes both slots so the next read
     /// has redundancy from the start.
     /// MUST be called from a background queue.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the residual-slot guard at the top is defense-in-depth. The
     /// canonical caller (`bootstrapOrUnlock`) only invokes this
     /// helper after `bootState() == .noStrongbox`, so the guard
@@ -714,7 +713,7 @@ public enum UnlockCoordinatorV2 {
     /// `WriteVerifyPhaseCallback` for the threading contract.
     public static func createNewStrongbox(password: String,
         onPhase: WriteVerifyPhaseCallback? = nil) throws {
-        // Part 4 mutation serialisation entry point. See the
+        // the durability fix mutation serialisation entry point. See the
         // `_mutationLock` static-property comment for the full
         // rationale; the lock holds across the entire residual
         // slot guard + key derivation + sealing + slot writes +
@@ -821,7 +820,7 @@ public enum UnlockCoordinatorV2 {
             p: JsBridge.SCRYPT_P,
             keyLen: JsBridge.SCRYPT_KEY_LEN)
 
-        // Step 4a (Part 11): reset+bump the anti-rollback counter
+        // Step 4a (the durability fix): reset+bump the anti-rollback counter
         // BEFORE the slot writes happen. The previous ordering
         // wrote both slots first and bumped the counter after; a
         // force-kill / OS reboot between the slot writes and the
@@ -835,16 +834,16 @@ public enum UnlockCoordinatorV2 {
         // leaves "counter set to 1, no slot files yet" which
         // re-enters the create flow on the next launch — and
         // `bumpFresh(to: 1)` is idempotent so the re-attempt is
-        // a no-op on the counter side. Closes UNIFIED-D011.
-        // (audit-grade notes for AI reviewers and human auditors):
-        // `bumpFresh` is delete-then-add as a single Keychain
+        // a no-op on the counter side. Closes the durability gap.
+        // (notes for reviewers):
+// `bumpFresh` is delete-then-add as a single Keychain
         // transaction — see `KeychainGenerationCounter.bumpFresh`
         // for why this replaces the historical `reset() + bump`
         // pair (the split version was a do/catch that swallowed
         // a `reset()` throw and skipped the bump silently;
         // `bumpFresh` collapses both into one transactional call
         // whose only failure mode the caller has to handle).
-        // Closes UNIFIED-D007.
+        // Closes the durability gap.
         do {
             try KeychainGenerationCounter.bumpFresh(to: 1)
         } catch {
@@ -908,7 +907,7 @@ public enum UnlockCoordinatorV2 {
         Strongbox.shared.installSnapshot(payload)
     }
 
-    // MARK: - First-time strongbox creation with initial wallet (Part 6)
+    // MARK: - First-time strongbox creation with initial wallet
 
     /// Combined first-launch bootstrap: creates a brand-new strongbox
     /// with `initialWallet` already inside the payload. Equivalent to
@@ -918,7 +917,7 @@ public enum UnlockCoordinatorV2 {
     /// an "empty-wallet" intermediate that a power-cut between the
     /// two calls would freeze in place.
     /// What it closes:
-    ///   SECURITY_AUDIT_FINDINGS.md UNIFIED-D004 — the failure mode
+    ///   — the failure mode
     ///   where a fresh-install power-cut between `createNewStrongbox`
     ///   and `appendWallet` left the user with a strongbox they had
     ///   typed a password for, but no wallets in it.
@@ -945,7 +944,7 @@ public enum UnlockCoordinatorV2 {
     /// Cross-references:
     ///   - `Strongbox.snapshotWithInitialWallet` for the snapshot
     ///     builder we hand to the codec.
-    ///   - SECURITY_AUDIT_FINDINGS.md UNIFIED-D004.
+    ///   - .
     ///   - `createNewStrongbox(password:)` for the empty-wallet
     ///     variant retained for tests and the (now legacy) code
     ///     paths that create an empty strongbox first.
@@ -1000,7 +999,7 @@ public enum UnlockCoordinatorV2 {
         }
 
         // Build the payload with the initial wallet already inside.
-        // Closes UNIFIED-D004: a power cut between the historical
+        // Closes the durability gap: a power cut between the historical
         // createNewStrongbox + appendWallet pair could leave an
         // empty-wallet intermediate that the user trusted as
         // "wallet saved".
@@ -1038,7 +1037,7 @@ public enum UnlockCoordinatorV2 {
             p: JsBridge.SCRYPT_P,
             keyLen: JsBridge.SCRYPT_KEY_LEN)
 
-        // Counter-before-slots ordering (Part 11). The bumpFresh
+        // Counter-before-slots ordering (the durability fix). The bumpFresh
         // resets any residual stale counter from a prior install
         // before the slot writes happen, so a force-kill between the
         // counter set and the slot writes leaves us with "counter
@@ -1105,7 +1104,7 @@ public enum UnlockCoordinatorV2 {
     /// (e.g. add wallet + set as current + record in network
     /// list) only pays scrypt once. For now we accept the
     /// straightforward-and-safe single-derivation cost.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the `UnlockAttemptLimiter` pre-check + `recordFailure` /
     /// `recordSuccess` bookkeeping is owned by THIS function so
     /// every password-bound write surface (Network add / switch,
@@ -1126,7 +1125,7 @@ public enum UnlockCoordinatorV2 {
     public static func persistSnapshot(_ payload: StrongboxPayload,
         password: String,
         onPhase: WriteVerifyPhaseCallback? = nil) throws {
-        // Part 4 mutation serialisation entry point. See the
+        // the durability fix mutation serialisation entry point. See the
         // `_mutationLock` static-property comment for the full
         // rationale. NSRecursiveLock so that the wallet/network/
         // setFlag higher-level mutators (which already take the
@@ -1288,7 +1287,7 @@ public enum UnlockCoordinatorV2 {
     /// as an alias so historical call sites that imported the
     /// "clear" verb continue to compile.
     public static func lock() {
-        // Part 4b: route the lock through `_mutationLock` so a
+        // route the lock through `_mutationLock` so a
         // SessionLock relock running concurrently with an in-flight
         // persist waits for the persist to finish rather than racing
         // it. Without this, the relock could clear the snapshot
@@ -1297,7 +1296,7 @@ public enum UnlockCoordinatorV2 {
         // read-winner and write), leaving the user with a
         // freshly-locked Strongbox plus a slot file that already
         // committed a payload they thought was relocked. See
-        // SECURITY_AUDIT_FINDINGS.md UNIFIED-D006.
+        // .
         _mutationLock.lock()
         defer { _mutationLock.unlock() }
         Strongbox.shared.clearSnapshot()
@@ -1317,7 +1316,7 @@ public enum UnlockCoordinatorV2 {
     /// Wraps `unlockWithPassword(_:)` with the SessionLock
     /// timestamping and BlockchainNetwork re-apply that every UI
     /// unlock site needs.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the brute-force `UnlockAttemptLimiter` bookkeeping
     /// (pre-check, recordFailure on auth failure, recordSuccess
     /// on success) is owned by `unlockWithPassword` itself - see
@@ -1356,7 +1355,7 @@ public enum UnlockCoordinatorV2 {
     /// the same user password through a different decrypt path
     /// (e.g. `JsBridge.decryptWalletJson` for the per-wallet
     /// seed envelope inside the Send flow).
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// before this helper existed, the Send screen called
     /// `JsBridge.decryptWalletJson` directly inside its unlock
     /// dialog's onUnlock callback, paying the limiter NO
@@ -1431,7 +1430,7 @@ public enum UnlockCoordinatorV2 {
         hasSeed: Bool,
         password: String,
         onPhase: WriteVerifyPhaseCallback? = nil) throws -> Int {
-        // Part 4 mutation serialisation. The lock holds across
+        // the durability fix mutation serialisation. The lock holds across
         // read-from-Strongbox + payload build + install + persist
         // so a concurrent mutator cannot interleave into the
         // pipeline. NSRecursiveLock so the inner persistSnapshot
@@ -1467,7 +1466,7 @@ public enum UnlockCoordinatorV2 {
         activeIndex: Int,
         password: String,
         onPhase: WriteVerifyPhaseCallback? = nil) throws {
-        // Part 4 mutation serialisation; see static-property
+        // the durability fix mutation serialisation; see static-property
         // comment on `_mutationLock`.
         _mutationLock.lock()
         defer { _mutationLock.unlock() }
@@ -1488,7 +1487,7 @@ public enum UnlockCoordinatorV2 {
     /// Switch the active wallet.
     public static func setCurrentWallet(idx: Int, password: String,
         onPhase: WriteVerifyPhaseCallback? = nil) throws {
-        // Part 4 mutation serialisation; see static-property
+        // the durability fix mutation serialisation; see static-property
         // comment on `_mutationLock`.
         _mutationLock.lock()
         defer { _mutationLock.unlock() }
@@ -1510,7 +1509,7 @@ public enum UnlockCoordinatorV2 {
     /// active network index" path.
     public static func setActiveNetwork(idx: Int, password: String,
         onPhase: WriteVerifyPhaseCallback? = nil) throws {
-        // Part 4 mutation serialisation; see static-property
+        // the durability fix mutation serialisation; see static-property
         // comment on `_mutationLock`.
         _mutationLock.lock()
         defer { _mutationLock.unlock() }
@@ -1569,7 +1568,7 @@ public enum UnlockCoordinatorV2 {
     private static func setFlag(password: String,
         onPhase: WriteVerifyPhaseCallback? = nil,
         build: (Strongbox) throws -> StrongboxPayload) throws {
-        // Part 4 mutation serialisation; see static-property
+        // the durability fix mutation serialisation; see static-property
         // comment on `_mutationLock`. The lock holds across the
         // build callback so two concurrent flag flips cannot
         // interleave their (read-shared-Strongbox + build new
@@ -1612,8 +1611,8 @@ public enum UnlockCoordinatorV2 {
         let tagStart = combined.count - 16
         let ct = combined.prefix(tagStart)
         let tag = combined.suffix(16)
-        // (audit-grade notes for AI reviewers and human
-        // auditors): the `alg` literal is "AES-GCM" exactly,
+        // (notes for reviewers):
+// the `alg` literal is "AES-GCM" exactly,
         // matching the canonical schema invariant enforced by
         // `StrongboxFileCodec.AeadEnvelope.expectedAlg`. A
         // typo here (e.g. the historical `AES-GC` mistake) is

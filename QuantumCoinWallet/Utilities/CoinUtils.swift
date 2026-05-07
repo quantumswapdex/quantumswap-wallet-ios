@@ -19,7 +19,7 @@ public enum CoinUtils {
     /// Maximum `decimals` value accepted by `parseUnits` /
     /// `formatUnits` before the input is treated as malformed
     /// and short-circuited to the existing `"0"` sentinel.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// `decimals` reaches these helpers from token-metadata RPC
     /// responses and from user-pasted contract definitions. A
     /// hostile RPC endpoint (or a malformed token contract) can
@@ -38,7 +38,7 @@ public enum CoinUtils {
     /// Maximum hex-input length accepted by `hexToDecimalString`
     /// before the conversion is treated as malformed and
     /// short-circuited to nil (which `formatUnits` maps to "0").
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the conversion is O(N^2) over the hex input length; the
     /// input ultimately comes from RPC responses (untrusted).
     /// A maliciously long hex string freezes the UI long enough

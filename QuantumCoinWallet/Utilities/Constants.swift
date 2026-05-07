@@ -32,8 +32,8 @@ public enum Constants {
 
     // MARK: - Network / active-session mutable state
 
-    // (audit-grade notes for AI reviewers and human auditors):
-    // these four mirrors are the legacy "any-thread read" path used
+    // (notes for reviewers):
+// these four mirrors are the legacy "any-thread read" path used
     // by UI surfaces (address-strip explorer button, network name
     // label, token-row contract link, etc.). The CANONICAL source
     // for any signing-correctness comparison is
