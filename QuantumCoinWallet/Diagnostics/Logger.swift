@@ -18,9 +18,8 @@
 // around for keys / ciphertexts / nonces)
 // * any single token from the BIP-39 wordlist (catches a
 // mnemonic word slipping through an exception message)
-// Why it exists (audit-grade notes for AI reviewers and human
-// auditors):
-// The audit (``) flagged that bare `print(...)` and
+// Why it exists (notes for reviewers):
+// Prior reviews flagged that bare `print(...)` and
 // `console.error(...)` sites were emitting raw error context to
 // Console.app and an attached debugger. In DEBUG, that context
 // could carry sensitive material (a `JsBridgeError(message:)`
@@ -52,7 +51,7 @@
 // (Bech32, base58, etc.) that we have not anticipated could
 // leak through. Mitigation: the call sites that pass through
 // this shim are also the ones whose error messages have been
-// audited for what they construct. Adding a new error message
+// reviewed for what they construct. Adding a new error message
 // that interpolates secret material is a code-review concern
 // even with the redactor in place.
 // - We deliberately do NOT redact in the BIP-39 case greedily

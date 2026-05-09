@@ -1,8 +1,8 @@
 // SecurityFixesTests.swift
-// Cross-cutting unit tests for the security audit fixes. Each
-// test pins one auditable invariant so any future refactor that
+// Cross-cutting unit tests for the security hardening fixes. Each
+// test pins one verifiable invariant so any future refactor that
 // breaks it fails CI before reaching review. The grouping
-// mirrors the audit-fix tracker headings:
+// mirrors the design notes headings:
 // * limiter centralisation - the shared
 //   `UnlockAttemptLimiter` implements the documented stair-step
 //   schedule and resets on success.
@@ -136,7 +136,7 @@ final class SecurityFixesTests: XCTestCase {
         // public API surface using `canonicalUiBlockHash`'s
         // companion - we exercise the alg gate by attempting to
         // round-trip the bogus envelope through `Aead.open`,
-        // which would also throw, but the audit invariant lives
+        // which would also throw, but the design invariant lives
         // in the codec itself. We assert the value of
         // `expectedAlg` so any future drift is loud.
         XCTAssertEqual(StrongboxFileCodec.AeadEnvelope.expectedAlg,
@@ -318,7 +318,7 @@ final class SecurityFixesTests: XCTestCase {
     /// `Aead.open` MUST reject an envelope whose `v` field does
     /// not match `envelopeVersion`, even if the AES-GCM payload is
     /// otherwise valid.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the wire field exists precisely to express the "this codec
     /// version produced this envelope" compatibility contract;
     /// silently accepting any `v` would break every future schema
@@ -382,7 +382,7 @@ final class SecurityFixesTests: XCTestCase {
 
     /// `canonicalHost(_:)` MUST strip a trailing dot before lookup,
     /// otherwise a perfectly valid FQDN form bypasses the pin.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the historical bug was `host.lowercased()` only, which let
     /// `app.readrelay.quantumcoinapi.com.` fall through to default
     /// system trust because the dictionary key is `…com` (no dot).
@@ -453,7 +453,7 @@ final class SecurityFixesTests: XCTestCase {
             + "trailing-dot normalization.")
     }
 
-    // MARK: - NetworkConfig sync mirror (UNIFIED-007 fix)
+    // MARK: - NetworkConfig sync mirror
 
     /// `NetworkConfig.publishSync` writes the snapshot atomically
     /// and `currentSync` reads back the byte-equal value. Pins the
@@ -473,14 +473,14 @@ final class SecurityFixesTests: XCTestCase {
         XCTAssertEqual(observed, sample,
             "currentSync must return the exact snapshot last "
             + "published via publishSync; any deviation breaks the "
-            + "synchronous-capture contract that closes UNIFIED-007.")
+            + "synchronous-capture contract that closes the race.")
     }
 
-    // MARK: - ApiClient.basePath thread safety (UNIFIED-006 fix)
+    // MARK: - ApiClient.basePath thread safety
 
     /// Fire 100 concurrent reads + writes against
     /// `ApiClient.shared.basePath` from a background thread pool.
-    /// Without the NSLock added by the UNIFIED-006 fix, this test
+    /// Without the NSLock added by the related race-condition fix, this test
     /// would surface as a TSan failure or an intermittent crash
     /// inside CFString's COW machinery. With the lock, the final
     /// value is one of the written candidates and no thread
@@ -513,7 +513,7 @@ final class SecurityFixesTests: XCTestCase {
             + "read would surface here as an unrecognised string.")
     }
 
-    // MARK: - BlockchainNetworkManager bootstrap atomicity (UNIFIED-006 fix)
+    // MARK: - BlockchainNetworkManager bootstrap atomicity
 
     /// `BlockchainNetworkManager.bootstrap()` runs through the
     /// `_stateLock` critical section and publishes the active
@@ -525,7 +525,7 @@ final class SecurityFixesTests: XCTestCase {
     /// `applyActiveLocked` that drops the synchronous publish
     /// would leave `NetworkConfig.currentSync` at `.empty` while
     /// `Constants.SCAN_API_URL` is set, surfacing the torn-view
-    /// bug that UNIFIED-007 closes.
+    /// bug that a prior race condition closes.
     func testBlockchainNetworkManagerBootstrapPublishesSynchronously() {
         BlockchainNetworkManager.shared.bootstrap()
         guard let active = BlockchainNetworkManager.shared.active else {
@@ -537,7 +537,7 @@ final class SecurityFixesTests: XCTestCase {
             "NetworkConfig.currentSync.scanApiUrl must equal "
             + "active.scanApiDomain immediately after bootstrap; a "
             + "drift here means applyActiveLocked stopped publishing "
-            + "synchronously, re-opening UNIFIED-007.")
+            + "synchronously, re-opening a prior race condition.")
         XCTAssertEqual(observed.rpcEndpoint, active.rpcEndpoint,
             "NetworkConfig.currentSync.rpcEndpoint must equal "
             + "active.rpcEndpoint after bootstrap.")
@@ -551,12 +551,12 @@ final class SecurityFixesTests: XCTestCase {
             + "mirrors.")
     }
 
-    // MARK: - Durability: AtomicSlotWriter writeAndVerify (Part 3 / D010)
+    // MARK: - Durability: AtomicSlotWriter writeAndVerify (the durability fix)
 
     /// Happy-path: `writeAndVerify` invokes the verify closure
     /// with the staged bytes, then promotes the slot. After
     /// return, `read(slot:)` MUST return the just-written bytes.
-    /// Pins the post-Part-3 contract that the rename only happens
+    /// Pins the post-fix contract that the rename only happens
     /// AFTER verify returns successfully and the bytes on disk are
     /// identical to what was passed in.
     func testAtomicSlotWriterWriteAndVerifyHappyPath() throws {
@@ -585,7 +585,7 @@ final class SecurityFixesTests: XCTestCase {
             })
         XCTAssertEqual(verifyInvocations, 1,
             "verify closure must be invoked exactly once per "
-            + "writeAndVerify call (UNIFIED-D010 fix).")
+            + "writeAndVerify call.")
         let readBack = try writer.read(slot: slot)
         XCTAssertEqual(readBack, payload,
             "after writeAndVerify returns the slot file MUST "
@@ -637,9 +637,9 @@ final class SecurityFixesTests: XCTestCase {
 
     /// Phase callback ordering: the canonical sequence is
     /// `.writing` -> `.verifying` -> `.promoting` -> `.committed`.
-    /// Pins the post-Part-3 contract the WaitDialog UI relies on
+    /// Pins the post-fix contract the WaitDialog UI relies on
     /// to toggle the "Verifying..." secondary status line
-    /// (Part 3f).
+    /// (the durability fix).
     func testAtomicSlotWriterPhaseCallbackOrdering() throws {
         let writer = AtomicSlotWriter.shared
         let slot = AtomicSlotWriter.Slot.B
@@ -662,7 +662,7 @@ final class SecurityFixesTests: XCTestCase {
             + "the WaitDialog UI's `setStatus(\"Verifying...\")` toggle "
             + "tracks the actual write pipeline; an out-of-order or "
             + "missing emit would surface as a stuck or misleading "
-            + "status string (Part 3e/3f / UNIFIED-D010).")
+            + "status string (the durability fix).")
     }
 
     /// `writeAndVerifyBytes` round-trip: after the call returns,
@@ -759,7 +759,7 @@ final class SecurityFixesTests: XCTestCase {
             + "a short read from a same-length corruption.")
     }
 
-    // MARK: - Durability: StrongboxRedundancyState (Part 10 / 12 / D003 / D012)
+    // MARK: - Durability: StrongboxRedundancyState (the durability fix)
 
     /// `markSingleSlot` sets `singleSlot=true`; `markRedundant`
     /// clears it. Pins the contract that the unlock dialog reads
@@ -776,26 +776,26 @@ final class SecurityFixesTests: XCTestCase {
             "markSingleSlot MUST flip the flag to true; the "
             + "unlock dialog reads this at present-time to "
             + "decide whether to surface the degraded-redundancy "
-            + "banner (UNIFIED-D012).")
+            + "banner.")
         state.markSingleSlot()  // Idempotent.
         XCTAssertTrue(state.singleSlot)
         state.markRedundant()
         XCTAssertFalse(state.singleSlot,
             "markRedundant MUST clear the flag; called by the "
-            + "re-mirror success path (Part 12) so the banner "
+            + "re-mirror success path (the durability fix) so the banner "
             + "auto-clears once redundancy is restored on disk.")
         state.markRedundant()  // Idempotent.
         XCTAssertFalse(state.singleSlot)
     }
 
-    // MARK: - Durability: StrongboxFileCodec.readCandidates (Part 10 / D003)
+    // MARK: - Durability: StrongboxFileCodec.readCandidates (the durability fix)
 
     /// `readCandidates` returns BOTH valid candidates ordered by
-    /// generation descending. Pins the post-Part-10 contract that
+    /// generation descending. Pins the post-fix contract that
     /// `unlockWithPassword` iterates winner-first then runner-up
     /// for the older-slot fallback path. A regression that lost
     /// the runner-up (e.g. by reverting to a `single-Optional`
-    /// return shape) would re-open UNIFIED-D003.
+    /// return shape) would re-open a prior durability gap.
     func testStrongboxFileCodecReadCandidatesReturnsBothWhenBothValid() throws {
         // We can't easily produce two MAC-valid slot files inline
         // without going through the full unlock pipeline (which
@@ -811,7 +811,7 @@ final class SecurityFixesTests: XCTestCase {
                 "readCandidates must return at least one entry "
                 + "when readWinner returns a non-nil decoded file; "
                 + "a divergence here means the older-slot fallback "
-                + "path (Part 10) cannot reach the runner-up.")
+                + "path (the durability fix) cannot reach the runner-up.")
             XCTAssertEqual(candidates.first?.generation, winner.generation,
                 "candidates[0] MUST match the winner; a swapped "
                 + "ordering would break the rollback-gate's "
@@ -823,12 +823,12 @@ final class SecurityFixesTests: XCTestCase {
         }
     }
 
-    // MARK: - Durability: KeychainGenerationCounter bumpFresh (Part 8 / 11 / D007 / D011)
+    // MARK: - Durability: KeychainGenerationCounter bumpFresh (the durability fix)
 
     /// `bumpFresh(to:)` MUST set the counter to the supplied
     /// value, allowing the next `read()` to return that value
     /// (or higher if a concurrent bump bumped past it). Pins the
-    /// Part-11 ordering invariant: createNewStrongbox calls
+    /// the durability fix ordering invariant: createNewStrongbox calls
     /// `bumpFresh(to: 1)` BEFORE writing the slot files, so the
     /// rollback gate doesn't false-positive on the very next
     /// unlock.
@@ -842,7 +842,7 @@ final class SecurityFixesTests: XCTestCase {
             "bumpFresh MUST set the counter to the supplied "
             + "value verbatim; a regression that treated bumpFresh "
             + "as a monotonic bump (i.e. a no-op when newValue < "
-            + "current) would re-open UNIFIED-D011 (false tamper "
+            + "current) would re-open a prior durability gap (false tamper "
             + "detected on first-launch unlock).")
         // Restore the baseline. bumpFresh is the only API that
         // can lower the counter (bump/bumpTo are monotonic), so

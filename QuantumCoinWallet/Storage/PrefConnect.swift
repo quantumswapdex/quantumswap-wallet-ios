@@ -3,8 +3,7 @@
 // flags the app needs to read BEFORE the user has typed their
 // password (and the strongbox is therefore still locked). Backed
 // by `Application Support/DP_QUANTUM_COIN_WALLET_APP_PREF.json`.
-// Why this exists (audit-grade notes for AI reviewers and human
-// auditors):
+// Why this exists (notes for reviewers):
 // The wallet's authoritative state - addresses, encrypted seed
 // envelopes, custom networks, the user's "phone backup" /
 // "advanced signing" / "camera permission asked" flags - lives
@@ -59,11 +58,11 @@
 // truth, and this file's API is restricted to the UI pref
 // allowlist above.
 //
-// Durability discipline (Part 5 of the durability fix plan):
+// Durability discipline (durability fix plan):
 // `flushLocked` mirrors the AtomicSlotWriter discipline:
 // open(O_WRONLY|O_CREAT|O_TRUNC) -> writeAll -> setProtection
 // -> F_FULLFSYNC the data fd -> rename .tmp into place ->
-// F_FULLFSYNC the parent directory. This closes UNIFIED-D002
+// F_FULLFSYNC the parent directory. This closes the durability gap
 // (a power loss between the .atomic-rename and the journal
 // flush losing every pref-file write since the last flush).
 // Public setters (`writeString`, `writeInt`, `writeBool`,
@@ -79,14 +78,14 @@
 // themselves remain `complete`; the weaker class only applies
 // to this small allowlist of UI prefs.
 //
-// Corrupt-file handling (Part 9 of the durability fix plan):
+// Corrupt-file handling (durability fix plan):
 // `init` distinguishes "file missing" (fresh install) from
 // "file present-but-unparseable" (silent NAND corruption,
-// process killed mid-write before Part 5 landed, etc). The
+// process killed mid-write before the hardening landed, etc). The
 // missing case is treated as a fresh install (memo := empty);
 // the corrupt case renames the bad file aside as
 // `*.corrupt.<unixtimestamp>` so the next setter call cannot
-// silently overwrite it. Closes UNIFIED-D008.
+// silently overwrite it. Closes the durability gap.
 
 import Foundation
 import Darwin
@@ -196,7 +195,7 @@ public final class PrefConnect {
         // empty memo) from "file present but unparseable" (treated
         // as a corrupt pref file we MUST NOT silently overwrite).
         // What it closes:
-        //   SECURITY_AUDIT_FINDINGS.md UNIFIED-D008. The historical
+        //   . The historical
         //   shape silently produced an empty memo for both cases;
         //   the corrupt-but-overwritable case is the dangerous one
         //   because the next `writeXxx` would replace the corrupt
@@ -330,7 +329,7 @@ public final class PrefConnect {
     /// including `WALLET_CURRENT_ADDRESS_INDEX_KEY`,
     /// `BLOCKCHAIN_NETWORK_ID_INDEX_KEY`, `BACKUP_ENABLED_KEY`, etc.
     /// What it closes:
-    ///   SECURITY_AUDIT_FINDINGS.md UNIFIED-D002 (PrefConnect power-
+    ///   (PrefConnect power-
     ///   loss data loss).
     /// Why this shape:
     ///   Mirrors `AtomicSlotWriter.write` so a future maintainer
@@ -349,7 +348,7 @@ public final class PrefConnect {
     /// Cross-references:
     ///   - `AtomicSlotWriter.swift` for the matching F_FULLFSYNC
     ///     pattern on the strongbox slot files.
-    ///   - SECURITY_AUDIT_FINDINGS.md UNIFIED-D002.
+    ///   - .
     private func flushLocked() throws {
         let data: Data
         do {

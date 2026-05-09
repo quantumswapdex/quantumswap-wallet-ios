@@ -2,8 +2,7 @@
 // Actor-backed network configuration with
 // a value-type `NetworkSnapshot` that signing call sites capture at
 // "Review" time and re-assert against at "Submit" time.
-// Why this exists (audit-grade notes for AI reviewers and human
-// auditors):
+// Why this exists (notes for reviewers):
 // The legacy state lived in `Constants.SCAN_API_URL`,
 // `Constants.RPC_ENDPOINT_URL`, `Constants.BLOCK_EXPLORER_URL`,
 // and `Constants.CHAIN_ID` - all declared as
@@ -128,7 +127,7 @@ public actor NetworkConfig {
 //   in `SendViewController` after a network switch) reads from
 //   `Constants.*` (which IS up-to-date) but `await NetworkConfig.shared.current`
 //   in the same Task hop returns the OLD snapshot - a torn view between
-//   the two sources of truth. This is UNIFIED-007.
+//   the two sources of truth. This is a prior race condition.
 // Why this shape (static NSLock + nonisolated(unsafe) storage):
 //   Cannot be added to the `actor` itself: actors are async-only by
 //   definition, and the whole point of this mirror is a synchronous
@@ -146,7 +145,7 @@ public actor NetworkConfig {
 //   Int) and both writes happen inside the BlockchainNetworkManager's
 //   `_stateLock` window so they cannot drift.
 // Cross-references:
-//   - UNIFIED-007 (NetworkConfig actor publish lag).
+//   - a prior race condition (NetworkConfig actor publish lag).
 //   - `BlockchainNetwork.swift` `applyActiveLocked()` is the only
 //     legitimate writer. SendViewController.presentReviewDialog is
 //     the canonical reader (sync capture at "Review" tap).

@@ -93,7 +93,7 @@ targets:
         # Both flags disabled so the QuantumCoin
         # folder no longer appears in iOS Files / iTunes / Finder.
         # The app does NOT write user-visible files to its sandbox
-        # `Documents/` directory (audited by `rg
+        # `Documents/` directory (verified by `rg
         # "documentDirectory|applicationSupportDirectory|cachesDirectory"
         # QuantumCoinWallet/`):
         #   - Encrypted prefs / strongbox: `Application Support/`
@@ -118,9 +118,9 @@ targets:
         # device. Without this declaration `canOpenURL` returns
         # `false` for every unknown scheme and the URL-handler
         # probe in `Security/TamperGate.swift` becomes a no-op.
-        # The audit-friendly visibility of these scheme names in
+        # The review-friendly visibility of these scheme names in
         # the Info.plist is itself a benefit: any reviewer
-        # (Apple's static analyser, an external auditor, a
+        # (Apple's static analyser, an external reviewer, a
         # security researcher reading the bundle) can see at a
         # glance that this app probes for jailbreak package
         # managers. iOS caps `LSApplicationQueriesSchemes` at 50

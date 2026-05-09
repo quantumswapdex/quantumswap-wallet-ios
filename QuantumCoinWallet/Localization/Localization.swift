@@ -179,6 +179,8 @@ public final class Localization {
     public func getAddressChecksumWarningByLangValues() -> String { langString("address-checksum-warning") }
     public func getPhoneBackupByLangValues() -> String { langString("phone-backup") }
     public func getBackupSavedByLangValues() -> String { langString("backup-saved") }
+    public func getBackupSubmittedCloudTitleByLangValues() -> String { langString("backup-submitted-cloud-title") }
+    public func getBackupSubmittedCloudMessageByLangValues() -> String { langString("backup-submitted-cloud-message") }
     public func getBackupFailedByLangValues() -> String { langString("backup-failed") }
     public func getBackupPasswordByLangValues() -> String { langString("backup-password") }
     public func getConfirmBackupPasswordByLangValues() -> String { langString("confirm-backup-password") }
@@ -208,6 +210,24 @@ public final class Localization {
     public func getWalletAlreadyExistsDetailedByLangValues() -> String { langString("wallet-already-exists-detailed") }
     public func getNoTransactionsByLangValues() -> String { langString("no-transactions") }
     public func getTokensByLangValues() -> String { langString("tokens") }
+    /// Segmented-control "Tokens" tab on the home screen. Displays
+    /// only token rows whose contract is in the binary-pinned
+    /// `RecognizedTokens` allow-list.
+    public func getTokensTabByLangValues() -> String { langString("tokens-tab") }
+    /// Segmented-control "Unrecognized Tokens" tab on the home
+    /// screen. Displays token rows that survived the stablecoin-
+    /// impersonator filter but whose contract is NOT in
+    /// `RecognizedTokens`.
+    public func getUnrecognizedTokensTabByLangValues() -> String { langString("unrecognized-tokens-tab") }
+    /// Send screen toggle row label. When the user flips this
+    /// switch ON, the Send asset picker also surfaces
+    /// unrecognized (but non-impersonator) tokens.
+    public func getShowUnrecognizedTokensByLangValues() -> String { langString("show-unrecognized-tokens") }
+    /// Transaction-review dialog header for the dedicated
+    /// contract-address row, rendered below the asset
+    /// (symbol/name) row whenever a token send is being
+    /// reviewed. Native sends omit the row.
+    public func getContractAddressByLangValues() -> String { langString("contract-address") }
     public func getNoTokensByLangValues() -> String { langString("no-tokens") }
     public func getContractByLangValues() -> String { langString("contract") }
     public func getSymbolByLangValues() -> String { langString("symbol") }

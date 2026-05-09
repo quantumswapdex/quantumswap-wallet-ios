@@ -4,8 +4,7 @@
 // disclosure dialog, the persistent banner, the hard-fail dialog,
 // the "consent already given" sticky bit, and the per-signing-call
 // throw used by `JsBridge.send*`.
-// Design discipline (audit-grade notes for AI reviewers and human
-// auditors):
+// Design discipline (notes for reviewers):
 // * The probe layer (`TamperGate`) MUST stay free of UIKit and
 // localization dependencies so it is unit-testable. That means
 // this file is the ONLY place where the words "jailbreak",
@@ -25,7 +24,7 @@
 // Quit; signing is non-overridable)
 // tamper -> HARD FAIL (per-launch dialog; user can ONLY
 // Quit; signing is non-overridable)
-// (audit-grade notes for AI reviewers and human auditors):
+// (notes for reviewers):
 // jailbreak detection uses an informed-consent dialog with a
 // sticky bit -
 // jailbreak signals are heuristic and a single false positive
@@ -142,7 +141,7 @@ public final class TamperGatePolicy: @unchecked Sendable {
     /// Set when a hard-fail decision has been made. Used by
     /// `assertSafeToSign` so a signing attempt fired between the
     /// hard-fail dialog and the `exit(0)` is still blocked.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// there is no "Ignore and resume" action that could clear
     /// this flag. The flag remains set for the
     /// remainder of the process lifetime, even after the
@@ -316,8 +315,8 @@ public final class TamperGatePolicy: @unchecked Sendable {
     public func assertSafeToSign() throws {
         guard Self.kTamperGateEnabled else { return }
 
-        // (audit-grade notes for AI reviewers and human
-        // auditors): the hard-fail signals are non-overridable.
+        // (notes for reviewers):
+// the hard-fail signals are non-overridable.
         // There is no "Ignore and resume" affordance that could
         // clear `hardFailReason`; the only ways out
         // of a hard-fail state are (a) the user taps Quit and the
@@ -402,7 +401,7 @@ public final class TamperGatePolicy: @unchecked Sendable {
     /// - **Quit** (cancel-style, default-emphasis): invokes
     /// `onQuit`, which terminates the process after the
     /// dismissal animation completes.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the dialog used to also offer "Ignore and resume" but
     /// that affordance was removed. A per-launch override is
     /// the only path that could let an opportunistic

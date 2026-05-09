@@ -3,8 +3,7 @@
 // the background so the iOS app-switcher snapshot does not leak
 // sensitive content (seed phrases, wallet addresses, balances,
 // pending transaction details).
-// Why this exists (audit-grade notes for AI reviewers and human
-// auditors):
+// Why this exists (notes for reviewers):
 // When iOS suspends an app, the system captures a snapshot of the
 // app's current UI and shows it in the App Switcher (the
 // horizontally-scrolling card UI a long-press / swipe-up exposes).

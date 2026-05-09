@@ -3,10 +3,8 @@
 // the TLS handshake of every CENTRALIZED endpoint the wallet
 // talks to from Swift via `URLSession` (i.e. the scan API).
 //
-// Why this exists (audit-grade notes for AI reviewers and human
-// auditors):
-//
-// (1) Baseline TLS still applies on EVERY endpoint, pinned or
+// Why this exists (notes for reviewers):
+// // (1) Baseline TLS still applies on EVERY endpoint, pinned or
 // not. URLSession (and WKWebView) validate the certificate
 // chain against the iOS system trust store, check the chain
 // signatures, check the leaf hostname matches the URL
@@ -43,7 +41,7 @@
 //   * `scanApiDomain` (`app.readrelay.quantumcoinapi.com`).
 //     All `ApiClient.get(...)` calls go through here.
 //
-// NOT PINNED, BY DESIGN (this is the part a security auditor
+// NOT PINNED, BY DESIGN (this is the part a security reviewer
 // asked us to spell out so it is unambiguous):
 //
 //   * RPC traffic. QuantumCoin is a non-custodial wallet for
@@ -115,8 +113,8 @@
 // fails closed (returns a nil hash, which fails the pin
 // comparison). All three of our default endpoints are RSA-2048
 // or ECDSA P-256, so this lookup table is exhaustive for the
-// coverage needs. Adding a new key type (e.g. Ed25519,
-// RSA-4096) is a one-line `kAsn1SpkiPrefixByKeyType` addition.
+// coverage needs. Adding a new key type (e.g. RSA-4096) is a
+// one-line `kAsn1SpkiPrefixByKeyType` addition.
 // - `kTlsPinningEnforced = true` ships pinning live. Two
 // emergency hatches exist: (1) `kPinFailureLogOnly = true`
 // converts a pin miss into a `Logger.debug` line and lets the
@@ -196,7 +194,7 @@ public enum TlsPinning {
     /// in `kSpkiPinsByHost`. Used by the network-config view to
     /// render a closed-padlock vs open-padlock badge next to each
     /// network's name.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the lookup MUST go through `canonicalHost(_:)` so a hostname
     /// with a trailing dot (`app.readrelay.quantumcoinapi.com.`)
     /// matches the dictionary key. Without this normalization the
@@ -212,8 +210,8 @@ public enum TlsPinning {
     // -----------------------------------------------------------
     // Hostname canonicalization. Single source of truth for
     // "what string do we feed to `kSpkiPinsByHost` lookups?".
-    // (audit-grade notes for AI reviewers and human auditors):
-    // every site that consults `kSpkiPinsByHost` MUST route the
+    // (notes for reviewers):
+// every site that consults `kSpkiPinsByHost` MUST route the
     // raw host string through here. The previous code path used
     // `host.lowercased()` directly, which let a trailing-dot FQDN
     // (`app.readrelay.quantumcoinapi.com.`) bypass the pin check

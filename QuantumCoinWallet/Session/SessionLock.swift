@@ -6,7 +6,7 @@
 // timestamp and locks + presents the unlock dialog if the budget
 // elapsed or the clock went backwards.
 //
-// (audit-grade notes for AI reviewers and human auditors): the
+// (notes for reviewers): the
 // elapsed-time arithmetic uses `mach_continuous_time()` (continuous
 // nanoseconds since boot, including device-suspended time), NOT
 // the wall-clock `CFAbsoluteTimeGetCurrent()`. The wall clock is
@@ -29,13 +29,12 @@
 // countdown is acceptable on the wall clock - it only fires while
 // the app is foregrounded, and `applicationWillResignActive`
 // cancels it on suspend.
-// (audit-grade notes for AI reviewers and human
-// auditors):
+// (notes for reviewers):
 // The original implementation installed only a `UITapGestureRecognizer`
 // on the key window. The comment "any UI interaction" was therefore
 // misleading: a user reading a long transaction list could swipe-
 // scroll for several minutes, never tap, and be relocked mid-scroll
-// even though they were clearly interacting with the app. The audit
+// even though they were clearly interacting with the app. Prior reviews
 // flagged this as a comment-vs-code mismatch.
 // The fix here is to widen the interaction surface to match the
 // comment, NOT to narrow the comment to match the code. Specifically
@@ -193,7 +192,7 @@ public final class SessionLock {
     /// handle architectures where 1 mach tick != 1 ns; on modern
     /// A-series chips numer == denom == 1 and the conversion is a
     /// no-op.
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// this primitive is a copy of `UnlockAttemptLimiter.monotonicNanos()`
     /// with the same overflow-safe split arithmetic for non-1:1
     /// timebases.
@@ -235,15 +234,15 @@ public final class SessionLock {
 
     private func lockAndPresent() {
         timer?.cancel()
-        // Part 4b: route the relock through `UnlockCoordinatorV2.lock()`
+        // route the relock through `UnlockCoordinatorV2.lock()`
         // (rather than `Strongbox.shared.clearSnapshot()` directly) so
         // the relock waits behind any in-flight `persistSnapshot` /
         // `appendWallet` / `setActiveNetwork` mutator. The coordinator's
         // `lock()` takes the same `_mutationLock` (NSRecursiveLock) as
         // every mutator, so a relock kicked off by the idle timer or a
         // >5min foreground-resume can never clear the snapshot in the
-        // middle of a write pipeline. See SECURITY_AUDIT_FINDINGS.md
-        // UNIFIED-D006 (relock-during-persist).
+        // middle of a write pipeline. See the security findings doc
+        // a prior durability gap (relock-during-persist).
         UnlockCoordinatorV2.lock()
         // No wallet configured yet? Just drop the snapshot -
         // there's nothing for the user to unlock. Onboarding will set

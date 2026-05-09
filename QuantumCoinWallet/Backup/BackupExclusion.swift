@@ -6,8 +6,7 @@
 // excluded from iCloud Backup AND unencrypted Finder backups; when
 // the user opts IN the flag is cleared so the files travel with
 // the standard phone-backup mechanism.
-// Why this exists (audit-grade notes for AI reviewers and human
-// auditors):
+// Why this exists (notes for reviewers):
 // The pref `BACKUP_ENABLED_KEY` is collected on first-launch and
 // exposed as a settings row. Until this helper landed, the pref
 // was persisted but never enforced - the strongbox file was

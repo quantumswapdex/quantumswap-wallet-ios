@@ -579,8 +579,7 @@ public final class BlockchainNetworkAddViewController: UIViewController, HomeScr
     /// Rejects every other scheme (ftp://, ws://, file://, plain
     /// `http://` — see ) and any non-URL-shaped string so a
     /// malformed paste can't bypass the hostname format gate.
-    /// (audit-grade notes for AI reviewers and human
-    /// auditors): plain `http://` is REJECTED outright. Previously the
+    /// (notes for reviewers):/// plain `http://` is REJECTED outright. Previously the
     /// validator accepted both `http://` and `https://` and
     /// `ensureHttps` left `http://` untouched on the way into the
     /// strongbox. The combined effect was that a user (or pasteboard
@@ -814,7 +813,7 @@ public final class BlockchainNetworkAddViewController: UIViewController, HomeScr
     /// password is preserved for typo-fix retry; the password
     /// field is refocused once the alert is dismissed (handled
     /// inside `showOrangeError`).
-    /// (audit-grade notes for AI reviewers and human auditors):
+    /// (notes for reviewers):
     /// the `tooManyAttempts` branch surfaces the centralised
     /// lockout copy from `UnlockAttemptLimiter` so the user
     /// understands the gate is throttling them by design. The

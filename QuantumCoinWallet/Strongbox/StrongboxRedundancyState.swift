@@ -2,12 +2,12 @@
 // Process-level signal carrying user-visible "the strongbox is
 // running with degraded redundancy right now" state.
 // What it closes:
-//   SECURITY_AUDIT_FINDINGS.md UNIFIED-D012. The historical
+//   . The historical
 //   `scheduleReMirror` path used `try?` for both the read-back and
 //   the write-back, so a transient I/O failure during the re-mirror
 //   left the surviving slot single-redundant indefinitely with no
-//   user-visible signal. A second silent corruption (Part 3 catches
-//   it at write time, but for an OLDER write that pre-dates Part 3)
+//   user-visible signal. A second silent corruption (the durability fix catches
+//   it at write time, but for an OLDER write that pre-dates the durability fix)
 //   would then trigger `bothSlotsInvalid` — i.e. the user only
 //   discovers the prior re-mirror failure when the second corruption
 //   has already destroyed their last good copy.
@@ -32,7 +32,7 @@
 //   create a fresh backup in response).
 // Cross-references:
 //   - `StrongboxFileCodec.scheduleReMirror` — the only writer.
-//   - SECURITY_AUDIT_FINDINGS.md UNIFIED-D012.
+//   - .
 //   - UI surfaces (`UnlockDialogViewController` etc.) read
 //     `singleSlot` at present-time to decide whether to show the
 //     "create a fresh backup soon" banner.

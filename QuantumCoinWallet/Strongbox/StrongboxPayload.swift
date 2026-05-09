@@ -1,8 +1,7 @@
 // StrongboxPayload.swift (Strongbox layer 5)
 // Typed model of the cleartext JSON inside the encrypted v2
 // `strongbox` field. Closes the schema-shape half of ``.
-// Why this exists (audit-grade notes for AI reviewers and human
-// auditors):
+// Why this exists (notes for reviewers):
 // In v1, every per-wallet datum (count, has-seed flag, current
 // wallet index, custom networks list, backup-enabled flag,
 // ...) was a separate plaintext key in `PrefConnect`. That

@@ -414,7 +414,7 @@ HomeScreenViewTypeProviding {
     // MARK: - Actions
 
     private func switchActive(toIndex index: Int) {
-        // PrefConnect setters are now throwing (Part 5). The current-
+        // PrefConnect setters are now throwing. The current-
         // wallet pointer is recoverable on next launch from the
         // strongbox's `currentWalletIndex` field, so a transient flush
         // failure here downgrades to "user opens to the previous
@@ -466,8 +466,8 @@ HomeScreenViewTypeProviding {
                 message: Localization.shared.getWaitWalletOpenByLangValues())
             dlg.present(wait, animated: true)
             Task.detached(priority: .userInitiated) { [weak self, weak dlg, weak wait] in
-                // (audit-grade notes for AI reviewers and human
-                // auditors): the reveal flow only needs
+                // (notes for reviewers):
+// the reveal flow only needs
                 // the seed words; we wipe the binary key
                 // material as soon as `decryptWalletJson`
                 // returns, so the only surviving secret in

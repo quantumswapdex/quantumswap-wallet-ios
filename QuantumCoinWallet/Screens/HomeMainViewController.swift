@@ -81,19 +81,83 @@ UITableViewDelegate {
     private let headerView = UIView()
     private let table = UITableView()
     private let scrollIndicator = VerticalScrollIndicatorView()
-    /// Bold "Tokens" title rendered ABOVE the card. Mirrors Android
-    /// `textView_tokenList_title` in `home_main_fragment.xml` (bold
-    /// 14dp, `colorCommon6`) and is hidden together with the card
-    /// whenever the wallet has no tokens to show on the active
-    /// network -- see `applyEmptyState()` which gates visibility on
-    /// `items.isEmpty` so an empty wallet renders nothing under the
-    /// Send / Receive strip (matching `HomeMainFragment.renderEmptyState`
-    /// in the Android client).
-    private let tokensTitleLabel = UILabel()
+    /// Two-tab segmented control replacing the previous "Tokens"
+    /// section title. The first tab shows tokens whose contract is
+    /// in `RecognizedTokens.all`; the second tab shows the rest of
+    /// the post-impersonator-filter list. The control sits in the
+    /// same screen position the title used to occupy, and is
+    /// hidden together with the card when both partitions are
+    /// empty (see `applyEmptyState()`). This is the anti-impersonation
+    /// surface that lets the user see at a glance whether a token
+    /// row is vendor-vouched (recognized) or strictly indexer-
+    /// derived (unrecognized).
+    private let tokensSegmentedControl: UISegmentedControl = {
+        let L = Localization.shared
+        return UISegmentedControl(items: [
+            L.getTokensTabByLangValues(),
+            L.getUnrecognizedTokensTabByLangValues()
+        ])
+    }()
+
+    /// Tab buckets enumerated as their backing index in
+    /// `tokensSegmentedControl` so a single accessor maps tab ->
+    /// data source slice without shadowing `selectedSegmentIndex`.
+    private enum TokensTab: Int { case recognized = 0, unrecognized = 1 }
+
+    /// Raw items from the scan API (post-impersonator-filter). The
+    /// table never reads this directly; it always reads through
+    /// `displayedItems` so the tab selection is the single source
+    /// of truth at render time.
     private var items: [AccountTokenSummary] = []
+    /// Recognized partition derived once per `applyFilteredItems`
+    /// pass so cellForRowAt does not re-filter on every scroll
+    /// callback.
+    private var recognizedItems: [AccountTokenSummary] = []
+    /// Unrecognized partition (everything in `items` that did NOT
+    /// land in `recognizedItems`).
+    private var unrecognizedItems: [AccountTokenSummary] = []
     private var nextPage = 1
     private var loading = false
     private var currentAddress: String { resolveCurrentAddress() }
+
+    /// Snapshot of the partition slice that the table data source
+    /// reads. MUST always be updated in lockstep with
+    /// `table.reloadData()` via `reloadDisplayedItems()` so that
+    /// `numberOfRowsInSection` and `cellForRowAt` cannot disagree.
+    ///
+    /// Why a stored snapshot (not a computed property reading
+    /// `recognizedItems` / `unrecognizedItems` live):
+    ///   `cellForRowAt` is sometimes called by UIKit AFTER
+    ///   `numberOfRowsInSection` returned a now-stale higher count -
+    ///   a UISegmentedControl `.valueChanged` action that fires
+    ///   inside a touch event's layout pass, a `reloadData()` from
+    ///   a NotificationCenter callback that races a previously
+    ///   scheduled layout, or a `loadNextPage` completion that
+    ///   mutates the partition arrays mid-render. With a computed
+    ///   `displayedItems`, those races read the NEW partition
+    ///   under an OLD index and crash with `Index out of range`.
+    ///   The snapshot is mutated only by `reloadDisplayedItems()`,
+    ///   which always pairs the assignment with `table.reloadData()`
+    ///   so any subsequent layout pass (even one queued before the
+    ///   call) sees a consistent (count, slice) pair.
+    private var displayedItems: [AccountTokenSummary] = []
+
+    /// Single chokepoint that refreshes the `displayedItems`
+    /// snapshot from the current tab + the current partition, then
+    /// asks the table to reload. Every call site that previously
+    /// invoked `table.reloadData()` directly should call this
+    /// instead so the snapshot can never lag behind the visible
+    /// table state.
+    private func reloadDisplayedItems() {
+        switch TokensTab(rawValue: tokensSegmentedControl.selectedSegmentIndex)
+            ?? .recognized {
+            case .recognized:
+            displayedItems = recognizedItems
+            case .unrecognized:
+            displayedItems = unrecognizedItems
+        }
+        table.reloadData()
+    }
 
     /// Monotonically increasing generation token bumped on every
     /// network switch. Each pagination fetch captures the value at
@@ -136,15 +200,16 @@ UITableViewDelegate {
         // a horizontal bar when more columns are off-screen and a
         // vertical bar (alongside the custom thumb) on the inner
         // table.
-        // Bold "Tokens" title sits OUTSIDE the horizontally-scrollable
-        // card so it stays put when the user pans through the column
-        // strip (Android parity: title lives in the parent
-        // `tokenList_container`, not the inner `HorizontalScrollView`).
-        tokensTitleLabel.translatesAutoresizingMaskIntoConstraints = false
-        tokensTitleLabel.text = Localization.shared.getTokensByLangValues()
-        tokensTitleLabel.font = Typography.boldTitle(14)
-        tokensTitleLabel.textColor = UIColor(named: "colorCommon6") ?? .label
-        view.addSubview(tokensTitleLabel)
+        // Two-tab segmented control sits OUTSIDE the
+        // horizontally-scrollable card so it stays put when the user
+        // pans through the column strip. The selected tab drives
+        // `displayedItems`, which the table data source reads
+        // directly; switching tabs simply triggers `reloadData`.
+        tokensSegmentedControl.translatesAutoresizingMaskIntoConstraints = false
+        tokensSegmentedControl.selectedSegmentIndex = TokensTab.recognized.rawValue
+        tokensSegmentedControl.addTarget(self, action: #selector(changeTokenTab),
+            for: .valueChanged)
+        view.addSubview(tokensSegmentedControl)
 
         horizontalScrollView.translatesAutoresizingMaskIntoConstraints = false
         horizontalScrollView.alwaysBounceHorizontal = true
@@ -194,26 +259,23 @@ UITableViewDelegate {
         view.addSubview(scrollIndicator)
 
         NSLayoutConstraint.activate([
-                // Title pinned to the top of the view, indented by the
-                // same `cardInset` that frames the card below so the
-                // text aligns flush with the card's leading edge.
-                // Android `home_main_fragment.xml` reserves
-                // `paddingTop="12dp"` and `paddingBottom="8dp"` around
-                // the title; we mirror that with a small leading top
-                // gap and 8pt of breathing room before the card.
-                tokensTitleLabel.topAnchor.constraint(equalTo: view.topAnchor, constant: 4),
-                tokensTitleLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Self.cardInset),
-                tokensTitleLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Self.cardInset),
+                // Segmented control pinned to the top of the view,
+                // inset by the same `cardInset` that frames the card
+                // below so the control sits flush with the card's
+                // leading edge. Sits in the same vertical position
+                // the previous "Tokens" title used to occupy.
+                tokensSegmentedControl.topAnchor.constraint(equalTo: view.topAnchor, constant: 4),
+                tokensSegmentedControl.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Self.cardInset),
+                tokensSegmentedControl.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Self.cardInset),
 
                 // Horizontal scroller is inset on bottom + leading +
                 // trailing by `cardInset` so the rounded card border is
                 // visible on every edge. Top sits 8pt below the
-                // "Tokens" title (Android paddingBottom on the title)
-                // so the card chrome reads as a labelled section
-                // rather than a floating panel. The trailing inset
-                // also doubles as the gutter for the custom vertical
-                // scroll indicator.
-                horizontalScrollView.topAnchor.constraint(equalTo: tokensTitleLabel.bottomAnchor, constant: 8),
+                // segmented control so the card chrome reads as a
+                // labelled section rather than a floating panel. The
+                // trailing inset also doubles as the gutter for the
+                // custom vertical scroll indicator.
+                horizontalScrollView.topAnchor.constraint(equalTo: tokensSegmentedControl.bottomAnchor, constant: 8),
                 horizontalScrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -Self.cardInset),
                 horizontalScrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Self.cardInset),
                 horizontalScrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Self.cardInset),
@@ -333,30 +395,59 @@ UITableViewDelegate {
         // tokens.
         fetchGeneration &+= 1
         items = []
+        recognizedItems = []
+        unrecognizedItems = []
         nextPage = 1
         loading = false
-        table.reloadData()
+        // Reset the tab back to "Recognized" on every network
+        // switch: the new chain might not have any unrecognized
+        // tokens at all, and leaving the user on the empty
+        // "Unrecognized Tokens" tab after a switch would look like
+        // a bug.
+        tokensSegmentedControl.selectedSegmentIndex = TokensTab.recognized.rawValue
+        reloadDisplayedItems()
         applyEmptyState()
         loadNextPage()
     }
 
-    /// Hide the entire token-table card AND the bold "Tokens"
-    /// section title whenever the wallet has no tokens to show on
-    /// the active network. Without this, an empty rounded card
-    /// with just the column-header row (or a stranded "Tokens"
-    /// label sitting above an empty area) would linger on the
-    /// home screen even when there is nothing to list - a
-    /// confusing "broken UI" affordance. Mirrors Android
-    /// `HomeMainFragment.renderEmptyState` which gates BOTH the
-    /// `textView_tokenList_title` and the scrollable card on the
-    /// `items.isEmpty()` flag. Toggled instead of removed from
-    /// the view hierarchy so the layout stays stable across
-    /// reloads / network switches.
+    /// Hide the entire token-table card AND the segmented tab
+    /// control whenever the post-impersonator-filter token list is
+    /// empty (i.e. no recognized AND no unrecognized rows to
+    /// show). Without this, an empty rounded card with just the
+    /// column-header row, plus a stranded segmented control above
+    /// it, would linger on the home screen even when there is
+    /// nothing to list - a confusing "broken UI" affordance.
+    /// Toggled instead of removed from the view hierarchy so the
+    /// layout stays stable across reloads / network switches.
     private func applyEmptyState() {
-        let isEmpty = items.isEmpty
-        tokensTitleLabel.isHidden = isEmpty
+        let isEmpty = recognizedItems.isEmpty && unrecognizedItems.isEmpty
+        tokensSegmentedControl.isHidden = isEmpty
         horizontalScrollView.isHidden = isEmpty
         scrollIndicator.isHidden = isEmpty
+    }
+
+    /// Tab change handler. Just swaps which partition the data
+    /// source returns; the scan-API state and pagination cursor
+    /// are unaffected. The empty-state surface is also a no-op
+    /// here because the segmented control is only visible if at
+    /// least one of the two partitions is non-empty.
+    @objc private func changeTokenTab() {
+        reloadDisplayedItems()
+    }
+
+    /// Single chokepoint that recomputes `recognizedItems` and
+    /// `unrecognizedItems` from `items`. Called after every
+    /// pagination append and on the initial load. Held as a
+    /// dedicated method so test fixtures and any future call
+    /// sites (e.g. a manual refresh button) can re-partition
+    /// without going through `loadNextPage`.
+    private func applyFilteredItems() {
+        recognizedItems = items.filter {
+            RecognizedTokens.isRecognized($0.contractAddress)
+        }
+        unrecognizedItems = items.filter {
+            !RecognizedTokens.isRecognized($0.contractAddress)
+        }
     }
 
     private func loadNextPage() {
@@ -394,8 +485,17 @@ UITableViewDelegate {
                     // simply don't extend the list.
                     return
                 }
-                self.items.append(contentsOf: resp.result ?? [])
-                self.table.reloadData()
+                // Pre-filter at the SINGLE chokepoint so
+                // stablecoin-impersonator tokens never reach
+                // either tab. Recognized contracts are
+                // explicitly let through inside the filter even
+                // when their name happens to match a pattern -
+                // see `StablecoinImpersonatorFilter`.
+                let raw = resp.result ?? []
+                let filtered = StablecoinImpersonatorFilter.filter(raw)
+                self.items.append(contentsOf: filtered)
+                self.applyFilteredItems()
+                self.reloadDisplayedItems()
                 self.applyEmptyState()
                 self.nextPage += 1
             }
@@ -465,15 +565,33 @@ UITableViewDelegate {
 
     // MARK: - UITableViewDataSource / Delegate
 
-    public func tableView(_ tv: UITableView, numberOfRowsInSection section: Int) -> Int { items.count }
+    public func tableView(_ tv: UITableView, numberOfRowsInSection section: Int) -> Int {
+        displayedItems.count
+    }
 
     public func tableView(_ tv: UITableView, cellForRowAt ip: IndexPath) -> UITableViewCell {
         let cell = tv.dequeueReusableCell(withIdentifier: "token", for: ip) as! TokenCell
-        cell.configure(items[ip.row])
+        // Defensive bounds check: `reloadDisplayedItems()` is the
+        // single chokepoint that keeps `displayedItems.count`
+        // in lockstep with the table's committed row count, but
+        // UIKit can ask for cells from a previously committed
+        // row count during in-flight layout passes (a tab-switch
+        // touch event, a NotificationCenter-driven reload, or
+        // an animation that races `reloadData()`). Returning a
+        // blank cell in that window is far less harmful than
+        // crashing the home screen.
+        guard ip.row >= 0, ip.row < displayedItems.count else { return cell }
+        cell.configure(displayedItems[ip.row])
         return cell
     }
 
     public func tableView(_ tv: UITableView, willDisplay cell: UITableViewCell, forRowAt ip: IndexPath) {
+        // Pagination cursor is global (the scan API returns rows
+        // we must split into the two tabs after the fact), so
+        // measure remaining rows against the FULL `items` list -
+        // not the per-tab `displayedItems` slice. Without this,
+        // switching to a partition with very few rows would stop
+        // pagination prematurely on the other tab.
         if ip.row >= items.count - 5 { loadNextPage() }
     }
 }

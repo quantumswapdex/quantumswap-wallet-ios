@@ -18,7 +18,7 @@
 // Layer 5 (Strongbox):
 // - StrongboxPayload checksum round-trip.
 // - Strongbox.shared snapshot lifecycle.
-// Audit-grade rationale:
+// design rationale:
 // These tests exist so a future regression cannot land
 // silently. The crypto-primitive tests are RFC vectors
 // (deterministic; any drift fails). The schema tests assert

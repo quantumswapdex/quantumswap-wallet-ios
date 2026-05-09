@@ -3,7 +3,7 @@
 // Single source of truth for every Keychain `kSecAttrAccount`
 // (a.k.a. "username") this app uses with iOS QuickType save /
 // autofill. The shape of these strings encodes three isolation
-// guarantees that downstream auditors and reviewers should
+// guarantees that downstream Reviewers and reviewers should
 // verify whenever a new screen starts saving a password:
 // 1. CONTEXT ISOLATION (strongbox vs. backup). Strongbox credentials
 // live under `QuantumCoin-<deviceSuffix>`; backup-file
@@ -26,7 +26,7 @@
 // queries with its OWN suffix, so:
 // - Device A never autofills Device B's strongbox password.
 // - A Save on Device A only overwrites Device A's slot.
-// audit-grade clarifications:
+// design clarifications:
 // * `identifierForVendor` returns nil briefly during early
 // boot on some devices, after a restore-from-backup race,
 // or in App Extensions. The fallback UUID handles those

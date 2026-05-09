@@ -155,6 +155,8 @@
       "address-checksum-warning": "This address does not match its expected checksum form. Double-check that the address is correct before sending.",
       "phone-backup": "Phone Backup",
       "backup-saved": "Wallet exported to [FOLDER]/[FILENAME]",
+      "backup-submitted-cloud-title": "Backup submitted to iCloud",
+      "backup-submitted-cloud-message": "Your wallet has been written to [FOLDER]/[FILENAME] and submitted to iCloud for upload. iCloud uploads finish in the background and may take time depending on your network. The backup is NOT yet fully durable in the cloud — keep this device powered on and connected until iCloud finishes the upload. You can check upload status in the Files app.",
       "backup-failed": "Failed to export wallet: [ERROR]",
       "backup-password": "Backup password",
       "confirm-backup-password": "Confirm password",
@@ -184,6 +186,10 @@
       "wallet-already-exists-detailed": "The wallet with following address already exists:\n[ADDRESS]",
       "no-transactions": "No transactions yet",
       "tokens": "Tokens",
+      "tokens-tab": "Tokens",
+      "unrecognized-tokens-tab": "Unrecognized Tokens",
+      "show-unrecognized-tokens": "Show Unrecognized Tokens",
+      "contract-address": "Contract address:",
       "no-tokens": "No tokens for this address",
       "contract": "Contract",
       "symbol": "Symbol",
@@ -215,7 +221,9 @@
       "submitting-transaction": "Please wait while your transaction is being submitted.",
       "transaction-sent": "Your transaction request has been sent.",
       "transaction-id": "Transaction ID",
-      "transaction-message-exits": "A transaction request is already in progress."
+      "transaction-message-exits": "A transaction request is already in progress.",
+      "show-password": "Show password",
+      "hide-password": "Hide password"
     },
     "errors": {
       "selectOption": "Please select an option.",
