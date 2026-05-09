@@ -57,6 +57,10 @@ targets:
       - path: QuantumCoinWallet
         excludes:
           - "**/*.md"
+          # INFOPLIST_FILE + info.path already own Info.plist; including it
+          # here adds Copy Bundle Resources and causes "Multiple commands produce
+          # .../QuantumCoinWallet.app/Info.plist" on modern Xcode.
+          - Info.plist
     resources:
       - path: QuantumCoinWallet/Resources
         buildPhase: resources
@@ -68,6 +72,8 @@ targets:
       path: QuantumCoinWallet/Info.plist
       properties:
         CFBundleDisplayName: "Quantum Wallet"
+        # Required by App Store validation (asset catalog set name).
+        CFBundleIconName: "AppIcon"
         CFBundleName: "QuantumCoinWallet"
         CFBundleShortVersionString: "1.0"
         CFBundleVersion: "1"
@@ -162,6 +168,10 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.quantumcoin.wallet
         INFOPLIST_FILE: QuantumCoinWallet/Info.plist
+        # Merged into the built Info.plist (belt-and-suspenders with the
+        # committed Info.plist); avoids App Store 90713 if a build phase
+        # ever strips plist keys.
+        INFOPLIST_KEY_CFBundleIconName: AppIcon
         CODE_SIGN_ENTITLEMENTS: QuantumCoinWallet/QuantumCoinWallet.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         DEVELOPMENT_TEAM: ""

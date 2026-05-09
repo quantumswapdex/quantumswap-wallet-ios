@@ -190,16 +190,16 @@ public enum TamperGate {
         #else
 
         var signals: [String] = []
-        signals.append(contentsOf: probeFileSystemMarkers)
-        signals.append(contentsOf: probeSandboxEscape)
+        signals.append(contentsOf: probeFileSystemMarkers())
+        signals.append(contentsOf: probeSandboxEscape())
         // `fork` is a stable jailbreak signal. Already covered by
         // the outer `#if !DEBUG && !targetEnvironment(simulator)`
         // gate; left without an inner gate so that any future
         // refactor that splits this function still sees fork only
         // in shipping builds.
-        signals.append(contentsOf: probeFork)
-        signals.append(contentsOf: probeDyldImages)
-        signals.append(contentsOf: probeURLSchemes)
+        signals.append(contentsOf: probeFork())
+        signals.append(contentsOf: probeDyldImages())
+        signals.append(contentsOf: probeURLSchemes())
 
         let runtimeReason = probeRuntimeTamper()
 
