@@ -3,7 +3,7 @@
 // flags the app needs to read BEFORE the user has typed their
 // password (and the strongbox is therefore still locked). Backed
 // by `Application Support/DP_QUANTUM_COIN_WALLET_APP_PREF.json`.
-// Why this exists (notes for reviewers):
+// Why this exists:
 // The wallet's authoritative state - addresses, encrypted seed
 // envelopes, custom networks, the user's "phone backup" /
 // "advanced signing" / "camera permission asked" flags - lives
@@ -57,7 +57,6 @@
 // surface is gone; the v2 strongbox is the single source of
 // truth, and this file's API is restricted to the UI pref
 // allowlist above.
-//
 // Durability discipline (durability fix plan):
 // `flushLocked` mirrors the AtomicSlotWriter discipline:
 // open(O_WRONLY|O_CREAT|O_TRUNC) -> writeAll -> setProtection
@@ -77,7 +76,6 @@
 // splash, before the unlock dialog appears). The slot files
 // themselves remain `complete`; the weaker class only applies
 // to this small allowlist of UI prefs.
-//
 // Corrupt-file handling (durability fix plan):
 // `init` distinguishes "file missing" (fresh install) from
 // "file present-but-unparseable" (silent NAND corruption,

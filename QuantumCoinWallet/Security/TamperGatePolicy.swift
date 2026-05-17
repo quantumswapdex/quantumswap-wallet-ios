@@ -4,7 +4,7 @@
 // disclosure dialog, the persistent banner, the hard-fail dialog,
 // the "consent already given" sticky bit, and the per-signing-call
 // throw used by `JsBridge.send*`.
-// Design discipline (notes for reviewers):
+// Design discipline:
 // * The probe layer (`TamperGate`) MUST stay free of UIKit and
 // localization dependencies so it is unit-testable. That means
 // this file is the ONLY place where the words "jailbreak",
@@ -24,7 +24,6 @@
 // Quit; signing is non-overridable)
 // tamper -> HARD FAIL (per-launch dialog; user can ONLY
 // Quit; signing is non-overridable)
-// (notes for reviewers):
 // jailbreak detection uses an informed-consent dialog with a
 // sticky bit -
 // jailbreak signals are heuristic and a single false positive
@@ -141,7 +140,6 @@ public final class TamperGatePolicy: @unchecked Sendable {
     /// Set when a hard-fail decision has been made. Used by
     /// `assertSafeToSign` so a signing attempt fired between the
     /// hard-fail dialog and the `exit(0)` is still blocked.
-    /// (notes for reviewers):
     /// there is no "Ignore and resume" action that could clear
     /// this flag. The flag remains set for the
     /// remainder of the process lifetime, even after the
@@ -315,7 +313,6 @@ public final class TamperGatePolicy: @unchecked Sendable {
     public func assertSafeToSign() throws {
         guard Self.kTamperGateEnabled else { return }
 
-        // (notes for reviewers):
 // the hard-fail signals are non-overridable.
         // There is no "Ignore and resume" affordance that could
         // clear `hardFailReason`; the only ways out
@@ -401,7 +398,6 @@ public final class TamperGatePolicy: @unchecked Sendable {
     /// - **Quit** (cancel-style, default-emphasis): invokes
     /// `onQuit`, which terminates the process after the
     /// dismissal animation completes.
-    /// (notes for reviewers):
     /// the dialog used to also offer "Ignore and resume" but
     /// that affordance was removed. A per-launch override is
     /// the only path that could let an opportunistic

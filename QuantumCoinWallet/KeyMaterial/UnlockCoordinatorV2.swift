@@ -6,7 +6,7 @@
 // every screen (HomeWallet, Send, Reveal, BackupOptions,
 // RestoreFlow, BlockchainNetwork, etc.) routes through the
 // public facade here.
-// Why this exists (notes for reviewers):
+// Why this exists:
 // The layered architecture confines all crypto + storage
 // coordination to a single layer-4 module. Every UI call site
 // sees an ergonomic, password-in / Strongbox-out API; the
@@ -45,28 +45,16 @@
 // 10. Strongbox.verifyChecksum(payload) // post-decrypt
 // integrity check; tamperDetected on mismatch.
 // 11. Strongbox.shared.installSnapshot(payload)
-// Step 12 ("Optional: regenerate `wrap.keychainWrap` if
-// absent") was deliberately removed. The per-device wrap key
-// was the storage primitive
-// for a future biometric-unlock UI that was never wired up;
-// there is no in-app affordance that ever consumes the wrap.
-// Keeping the regeneration path was generating a 32-byte
-// AES key on first unlock, persisting it to the Keychain,
-// and re-encrypting `mainKey` under it on every subsequent
-// unlock - all of which produced reachable ciphertext that
-// added attack surface (the Keychain entry could be
-// extracted with a jailbreak; the disk-side `wrap.keychainWrap`
-// could be transported off-device) without enabling any
-// user-facing feature. We delete the wrap-key code path
-// entirely; if a biometric unlock UI is ever added, it
-// should be designed against `kSecAttrAccessControl =
-// biometryCurrentSet` (which forces the wrap to invalidate
-// when a coerced enrollment changes the biometric set)
-// rather than the unconditional Keychain entry that this
-// removal walks back. The schema field
-// `decoded.keychainWrap` is retained as `Optional<Aead>?`
-// for forward read-compat with old slot files; new writes
-// always pass `keychainWrap: nil`.
+// The schema previously carried an optional iOS-only
+// `wrap.keychainWrap` envelope for a never-shipped biometric
+// unlock. The strongbox file now carries `wrap.passwordWrap`
+// only and is byte-identical to the Android slot format at the
+// wrap layer; the decoder rejects any extraneous `wrap.*`
+// keys. If a biometric unlock UI is ever added, it should
+// store its per-device wrap-key state in a sibling sidecar
+// file (see `KeychainWrapSidecar.swift`) under
+// `kSecAttrAccessControl = biometryCurrentSet`, never inside
+// the slot envelope.
 // Persist sequence:
 // 1. plaintext = JSONEncoder().encode(payload, sortedKeys)
 // 2. padded = StrongboxPadding.pad(plaintext)
@@ -79,13 +67,14 @@
 // -> internally computes the file-level MAC and calls
 // AtomicSlotWriter.write(toInactive)
 // Tradeoffs:
-// - Every persist re-encrypts the entire 32 KiB strongbox and
-// re-MACs the slot file. Combined with 's two
-// F_FULLFSYNC calls, a single user toggle costs ~10-30 ms
-// of synchronous I/O. Acceptable given the user-driven
-// write rate. The alternative (incremental write to a
-// subset of fields) was rejected because it would require
-// per-field MACs and a much more complex schema.
+// - Every persist re-encrypts the entire 4 MiB strongbox and
+// re-MACs the slot file. Combined with AtomicSlotWriter's
+// two F_FULLFSYNC calls, a single user toggle costs < ~50
+// ms of synchronous I/O on a modern iPhone. Acceptable
+// given the user-driven write rate. The alternative
+// (incremental write to a subset of fields) was rejected
+// because it would require per-field MACs and a much more
+// complex schema.
 // - The `mainKey` is held in a stack `Data` for the duration
 // of the closure passed to `withMainKey`; on return the
 // bytes are zeroed in `defer`. The `String` form of the
@@ -181,7 +170,7 @@ public enum UnlockCoordinatorV2 {
     //   Every public mutator below (`createNewStrongbox`,
     //   `createNewStrongboxWithInitialWallet`, `persistSnapshot`,
     //   `appendWallet`, `replaceNetworks`, `setCurrentWallet`,
-    //   `setActiveNetwork`, `setBackupEnabled`,
+    //   `setActiveNetwork`,
     //   `setAdvancedSigning`, `setCameraPermissionAskedOnce`,
     //   `setCloudBackupFolderUri`, `lock`) reads the winning
     //   slot, decides the new payload, installs it into
@@ -304,7 +293,6 @@ public enum UnlockCoordinatorV2 {
     /// `persist` calls can write to the OTHER slot).
     /// MUST be called from a background queue (scrypt is
     /// expensive).
-    /// (notes for reviewers):
     /// the `UnlockAttemptLimiter` pre-check + `recordFailure` /
     /// `recordSuccess` bookkeeping is owned by THIS function so
     /// every password-bound unlock surface (cold-launch unlock,
@@ -447,6 +435,19 @@ public enum UnlockCoordinatorV2 {
         decoded: StrongboxFileCodec.DecodedFile,
         password: String
     ) throws -> (payload: StrongboxPayload, decoded: StrongboxFileCodec.DecodedFile) {
+        // Defense-in-depth: the codec already rejects sub-minimum
+        // kdf params at decode, but if a future caller ever
+        // bypasses `StrongboxFileCodec.decodeOnly` (e.g., a unit
+        // test or a migration tool that constructs `DecodedFile`
+        // directly) this guard keeps us from running scrypt with
+        // weakened cost. Mirrored on Android at
+        // `UnlockCoordinator.deriveKeyViaScrypt`.
+        let p = decoded.kdfParams
+        if p.N < JsBridge.SCRYPT_N || p.r < JsBridge.SCRYPT_R
+            || p.p < JsBridge.SCRYPT_P || p.keyLen < JsBridge.SCRYPT_KEY_LEN {
+            throw UnlockCoordinatorV2Error.tamperDetected(
+                "scrypt parameters below documented minimum (got N=\(p.N),r=\(p.r),p=\(p.p),keyLen=\(p.keyLen))")
+        }
         // Step 1: derive scrypt key from password + on-disk salt.
         // design note: scrypt is the brute-force cost ceiling.
         // If an attacker has the slot file in hand they MUST
@@ -505,7 +506,7 @@ public enum UnlockCoordinatorV2 {
             throw UnlockCoordinatorV2Error.tamperDetected("strongbox aead: \(error)")
         }
 
-        // Step 5: strip fixed-size 32 KiB padding.
+        // Step 5: strip fixed-size 4 MiB padding.
         let plaintext: Data
         do {
             plaintext = try StrongboxPadding.unpad(paddedPlaintext)
@@ -517,11 +518,16 @@ public enum UnlockCoordinatorV2 {
         // inner checksum.
         let payload: StrongboxPayload
         do {
-            payload = try JSONDecoder().decode(StrongboxPayload.self, from: plaintext)
+            // Opt-out of URL rewriting on the strongbox decode path
+            // so on-disk bytes round-trip without mutation. See
+            // `BlockchainNetwork.init(from:)` for the contract.
+            let strongboxDecoder = JSONDecoder()
+            strongboxDecoder.userInfo[.blockchainNetworkRewriteUrls] = false
+            payload = try strongboxDecoder.decode(StrongboxPayload.self, from: plaintext)
         } catch {
             throw UnlockCoordinatorV2Error.tamperDetected("payload decode: \(error)")
         }
-        guard Strongbox.verifyChecksum(of: payload) else {
+        guard Strongbox.verifyChecksum(of: payload, mainKey: mainKey) else {
             throw UnlockCoordinatorV2Error.tamperDetected("payload checksum mismatch")
         }
 
@@ -690,7 +696,6 @@ public enum UnlockCoordinatorV2 {
     /// `StrongboxPayload`, and writes both slots so the next read
     /// has redundancy from the start.
     /// MUST be called from a background queue.
-    /// (notes for reviewers):
     /// the residual-slot guard at the top is defense-in-depth. The
     /// canonical caller (`bootstrapOrUnlock`) only invokes this
     /// helper after `bootState() == .noStrongbox`, so the guard
@@ -754,11 +759,14 @@ public enum UnlockCoordinatorV2 {
         }
 
         // Step 1: generate fresh salt + mainKey via SecureRandom
-        // ( throwing wrapper; never silently zero).
+        // (throwing wrapper; never silently zero). v=3 uses a
+        // 32-byte scrypt salt for cross-platform parity with
+        // Android (whose generator has always emitted 32 bytes).
+        // No KDF cost change; just more salt entropy.
         var salt: Data
         var mainKey: Data
         do {
-            salt = try SecureRandom.bytes(16)
+            salt = try SecureRandom.bytes(32)
             mainKey = try SecureRandom.bytes(32)
         } catch {
             throw UnlockCoordinatorV2Error.storageUnavailable(underlying: error)
@@ -783,13 +791,14 @@ public enum UnlockCoordinatorV2 {
             throw UnlockCoordinatorV2Error.storageUnavailable(underlying: error)
         }
 
-        // Step 3: build empty payload; pad to bucket; AEAD-seal
-        // under mainKey.
-        let payload = Strongbox.emptySnapshot()
+        // Step 3: build empty payload; stamp keyed checksum;
+        // pad to bucket; AEAD-seal under mainKey.
+        let payload = Strongbox.stampChecksum(
+            of: Strongbox.emptySnapshot(), mainKey: mainKey)
         let payloadBytes: Data
         do {
             let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
             payloadBytes = try encoder.encode(payload)
         } catch {
             throw UnlockCoordinatorV2Error.storageUnavailable(underlying: error)
@@ -835,7 +844,6 @@ public enum UnlockCoordinatorV2 {
         // re-enters the create flow on the next launch — and
         // `bumpFresh(to: 1)` is idempotent so the re-attempt is
         // a no-op on the counter side. Closes the durability gap.
-        // (notes for reviewers):
 // `bumpFresh` is delete-then-add as a single Keychain
         // transaction — see `KeychainGenerationCounter.bumpFresh`
         // for why this replaces the historical `reset() + bump`
@@ -870,7 +878,6 @@ public enum UnlockCoordinatorV2 {
                 kdfSalt: salt,
                 kdfParams: kdfParams,
                 passwordWrap: passwordWrapEnv,
-                keychainWrap: nil,
                 strongbox: strongboxEnv,
                 macKey: macKey,
                 mainKey: mainKey,
@@ -890,7 +897,6 @@ public enum UnlockCoordinatorV2 {
                 kdfSalt: salt,
                 kdfParams: kdfParams,
                 passwordWrap: passwordWrapEnv,
-                keychainWrap: nil,
                 strongbox: strongboxEnv,
                 macKey: macKey,
                 mainKey: mainKey,
@@ -935,12 +941,12 @@ public enum UnlockCoordinatorV2 {
     ///   Both are recoverable; the historical "empty wallet
     ///   intermediate" is not.
     /// Tradeoffs:
-    ///   The caller must produce the encrypted seed (via
-    ///   `JsBridge.encryptWalletJson`) BEFORE this call, since we
-    ///   take a fully-formed `StrongboxPayload.Wallet`. The
-    ///   alternative (do the JS bridge encryption inside this
-    ///   function) would couple layer 4 to the JS bridge, which we
-    ///   deliberately avoid.
+    ///   The caller must derive the raw signing-key bytes (via
+    ///   `JsBridge.walletFromPhrase` or `walletFromKeys`) BEFORE
+    ///   this call, since we take a fully-formed
+    ///   `StrongboxPayload.Wallet`. The alternative (do the JS
+    ///   bridge derivation inside this function) would couple
+    ///   layer 4 to the JS bridge, which we deliberately avoid.
     /// Cross-references:
     ///   - `Strongbox.snapshotWithInitialWallet` for the snapshot
     ///     builder we hand to the codec.
@@ -971,10 +977,12 @@ public enum UnlockCoordinatorV2 {
             throw UnlockCoordinatorV2Error.storageUnavailable(underlying: error)
         }
 
+        // v=3: 32-byte scrypt salt for byte-equivalent parity
+        // with Android's generator. Same KDF cost.
         var salt: Data
         var mainKey: Data
         do {
-            salt = try SecureRandom.bytes(16)
+            salt = try SecureRandom.bytes(32)
             mainKey = try SecureRandom.bytes(32)
         } catch {
             throw UnlockCoordinatorV2Error.storageUnavailable(underlying: error)
@@ -998,16 +1006,19 @@ public enum UnlockCoordinatorV2 {
             throw UnlockCoordinatorV2Error.storageUnavailable(underlying: error)
         }
 
-        // Build the payload with the initial wallet already inside.
+        // Build the payload with the initial wallet already inside,
+        // then stamp the v=3 keyed-HMAC checksum.
         // Closes the durability gap: a power cut between the historical
         // createNewStrongbox + appendWallet pair could leave an
         // empty-wallet intermediate that the user trusted as
         // "wallet saved".
-        let payload = Strongbox.snapshotWithInitialWallet(initialWallet)
+        let payload = Strongbox.stampChecksum(
+            of: Strongbox.snapshotWithInitialWallet(initialWallet),
+            mainKey: mainKey)
         let payloadBytes: Data
         do {
             let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
             payloadBytes = try encoder.encode(payload)
         } catch {
             throw UnlockCoordinatorV2Error.storageUnavailable(underlying: error)
@@ -1057,7 +1068,6 @@ public enum UnlockCoordinatorV2 {
                 kdfSalt: salt,
                 kdfParams: kdfParams,
                 passwordWrap: passwordWrapEnv,
-                keychainWrap: nil,
                 strongbox: strongboxEnv,
                 macKey: macKey,
                 mainKey: mainKey,
@@ -1070,7 +1080,6 @@ public enum UnlockCoordinatorV2 {
                 kdfSalt: salt,
                 kdfParams: kdfParams,
                 passwordWrap: passwordWrapEnv,
-                keychainWrap: nil,
                 strongbox: strongboxEnv,
                 macKey: macKey,
                 mainKey: mainKey,
@@ -1104,7 +1113,6 @@ public enum UnlockCoordinatorV2 {
     /// (e.g. add wallet + set as current + record in network
     /// list) only pays scrypt once. For now we accept the
     /// straightforward-and-safe single-derivation cost.
-    /// (notes for reviewers):
     /// the `UnlockAttemptLimiter` pre-check + `recordFailure` /
     /// `recordSuccess` bookkeeping is owned by THIS function so
     /// every password-bound write surface (Network add / switch,
@@ -1186,12 +1194,21 @@ public enum UnlockCoordinatorV2 {
         }
         defer { mainKey.resetBytes(in: 0..<mainKey.count) }
 
+        // Stamp the keyed inner-payload checksum (HMAC-SHA-256
+        // under HKDF(mainKey, salt=nil, "strongbox-payload-
+        // checksum-v3", 32)). Replaces any placeholder set by
+        // the snapshot builder. Encoding for AEAD seal happens
+        // immediately after so the checksum and the byte-
+        // sequence the verifier sees are derived from the same
+        // canonical payload bytes.
+        let stamped = Strongbox.stampChecksum(of: payload, mainKey: mainKey)
+
         // Encode + pad + seal new strongbox.
         let plaintext: Data
         do {
             let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
-            plaintext = try encoder.encode(payload)
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            plaintext = try encoder.encode(stamped)
         } catch {
             throw UnlockCoordinatorV2Error.storageUnavailable(underlying: error)
         }
@@ -1231,11 +1248,10 @@ public enum UnlockCoordinatorV2 {
                 // read-compat with old slot files, but new
                 // writes never re-emit a per-device wrap. See
                 // the file header step-12 deletion comment.
-                keychainWrap: nil,
                 strongbox: newStrongboxEnv,
                 macKey: macKey,
                 mainKey: mainKey,
-                expectedPayload: payload,
+                expectedPayload: stamped,
                 uiBlock: [:],
                 currentSlot: pickSlotMatching(decoded: decoded),
                 onPhase: onPhase)
@@ -1316,7 +1332,6 @@ public enum UnlockCoordinatorV2 {
     /// Wraps `unlockWithPassword(_:)` with the SessionLock
     /// timestamping and BlockchainNetwork re-apply that every UI
     /// unlock site needs.
-    /// (notes for reviewers):
     /// the brute-force `UnlockAttemptLimiter` bookkeeping
     /// (pre-check, recordFailure on auth failure, recordSuccess
     /// on success) is owned by `unlockWithPassword` itself - see
@@ -1352,18 +1367,18 @@ public enum UnlockCoordinatorV2 {
 
     /// Wrap a password-bound operation that is NOT the strongbox
     /// unlock or persist (which are self-limited) but that uses
-    /// the same user password through a different decrypt path
-    /// (e.g. `JsBridge.decryptWalletJson` for the per-wallet
-    /// seed envelope inside the Send flow).
-    /// (notes for reviewers):
-    /// before this helper existed, the Send screen called
-    /// `JsBridge.decryptWalletJson` directly inside its unlock
-    /// dialog's onUnlock callback, paying the limiter NO
-    /// attention - that made the Send path an open password
-    /// oracle because the per-wallet `encryptedSeed` is sealed under
-    /// the same password as `passwordWrap`. Routing the call
-    /// through this helper makes the brute-force-limit
-    /// engagement a code-level invariant for that surface too.
+    /// the same user password through a different scrypt+AEAD
+    /// path (e.g. cloud `.wallet` import in `RestoreFlow`, where
+    /// the file's per-export envelope is sealed under a
+    /// user-supplied backup password and a wrong guess MUST
+    /// count toward the shared lockout).
+    /// before this helper existed, callers ran the password-
+    /// dependent decrypt directly in their unlock dialog's
+    /// onUnlock callback, paying the limiter NO attention - that
+    /// made each such surface an open password oracle against
+    /// the user password. Routing every such call through this
+    /// helper makes the brute-force-limit engagement a code-
+    /// level invariant for those surfaces too.
     /// On `op` success the shared counter is reset; on any
     /// thrown error the counter is incremented. Reasoning for
     /// the conservative "any error" treatment: the underlying
@@ -1412,11 +1427,14 @@ public enum UnlockCoordinatorV2 {
     // because layer 4 re-derives mainKey on every write -
     // see the file header for the no-long-lived-mainKey
     // rationale.
-    // If the persist throws, we deliberately leave the in-memory
-    // snapshot installed (the user will see the change in the
-    // current session). The next unlock will re-read the
-    // previous-good slot, so the on-disk state is always
-    // consistent with what the user last saw acknowledged.
+    // If the persist throws, the speculative in-memory install is
+    // rolled back to the prior snapshot so a failed write never
+    // leaves a ghost entry behind. Without the rollback the
+    // restore-retry path (RestoreFlow.tryDecryptAndStore) would
+    // misclassify a subsequent retry as ".alreadyExists" via the
+    // dedupe gate on `Strongbox.shared.addressToIndex`, surfacing
+    // the misleading "already exists" toast and stranding the
+    // wallet in memory with no on-disk record.
 
     /// Append a freshly-created wallet to the strongbox. Build a
     /// new payload that includes the wallet, install it in
@@ -1426,8 +1444,10 @@ public enum UnlockCoordinatorV2 {
     /// for UI-side "Verifying..." status updates.
     @discardableResult
     public static func appendWallet(address: String,
-        encryptedSeed: String,
+        privateKey: Data,
+        publicKey: Data,
         hasSeed: Bool,
+        seedWords: String,
         password: String,
         onPhase: WriteVerifyPhaseCallback? = nil) throws -> Int {
         // the durability fix mutation serialisation. The lock holds across
@@ -1447,16 +1467,41 @@ public enum UnlockCoordinatorV2 {
         let wallet = StrongboxPayload.Wallet(
             idx: next,
             address: address,
-            encryptedSeed: encryptedSeed,
-            hasSeed: hasSeed)
+            privateKey: privateKey,
+            publicKey: publicKey,
+            hasSeed: hasSeed,
+            seedWords: hasSeed ? seedWords : "")
         let payload: StrongboxPayload
         do {
             payload = try Strongbox.shared.snapshotByAppendingWallet(wallet)
         } catch {
             throw UnlockCoordinatorV2Error.notUnlocked
         }
+        // Capture the prior snapshot BEFORE the speculative install
+        // so a persist failure can roll the in-memory state back to
+        // the previous-good shape. Holding the mutation lock for
+        // the full capture + install + persist window means no
+        // concurrent reader can observe an intermediate state and
+        // no concurrent mutator can install a different snapshot
+        // between our capture and our rollback.
+        let priorSnapshot = Strongbox.shared.snapshotOrNil
         Strongbox.shared.installSnapshot(payload)
-        try persistSnapshot(payload, password: password, onPhase: onPhase)
+        do {
+            try persistSnapshot(payload, password: password, onPhase: onPhase)
+        } catch {
+            // Roll back the speculative install. The prior snapshot
+            // is guaranteed non-nil here by the `isSnapshotLoaded`
+            // guard above plus the mutation lock; the
+            // `clearSnapshot` branch is defensive belt-and-braces
+            // for the invariant-violating "loaded then unloaded
+            // under the lock" race that the lock itself rules out.
+            if let priorSnapshot = priorSnapshot {
+                Strongbox.shared.installSnapshot(priorSnapshot)
+            } else {
+                Strongbox.shared.clearSnapshot()
+            }
+            throw error
+        }
         return next
     }
 
@@ -1526,17 +1571,12 @@ public enum UnlockCoordinatorV2 {
         try persistSnapshot(payload, password: password, onPhase: onPhase)
     }
 
-    /// Flip the `backupEnabled` user toggle inside the strongbox
-    /// (the on-disk persistence). The pref-side enforcement of
-    /// the toggle (`isExcludedFromBackupKey` on the slot files)
-    /// is owned by `BackupExclusion`; this helper only writes the
-    /// in-strongbox copy so the value survives a relock.
-    public static func setBackupEnabled(_ enabled: Bool, password: String,
-        onPhase: WriteVerifyPhaseCallback? = nil) throws {
-        try setFlag(password: password, onPhase: onPhase) { sb in
-            try sb.snapshotByChangingFlag(backupEnabled: enabled)
-        }
-    }
+    // No `setBackupEnabled` helper by design. The backup-enabled
+    // toggle does not live inside the encrypted payload; toggling
+    // it is a pure UserDefaults pref write (see
+    // `BackupExclusion.swift`) so the OS backup agent can read it
+    // pre-unlock without ever needing the wallet password. There
+    // is no in-strongbox copy to keep in sync.
 
     /// Flip the `advancedSigning` user toggle inside the
     /// strongbox.
@@ -1562,6 +1602,28 @@ public enum UnlockCoordinatorV2 {
         onPhase: WriteVerifyPhaseCallback? = nil) throws {
         try setFlag(password: password, onPhase: onPhase) { sb in
             try sb.snapshotByChangingFlag(cloudBackupFolderUri: uri)
+        }
+    }
+
+    /// Insert (or overwrite) `value` at `key` in the v=3
+    /// `secureItems` map. Mirrors Android
+    /// `SecureStorage.setSecureItem(key, value, password)`.
+    /// The map is part of the strongbox plaintext so the
+    /// AEAD seal is the only encryption layer.
+    public static func setSecureItem(key: String, value: String, password: String,
+        onPhase: WriteVerifyPhaseCallback? = nil) throws {
+        try setFlag(password: password, onPhase: onPhase) { sb in
+            try sb.snapshotBySettingSecureItem(key, value: value)
+        }
+    }
+
+    /// Remove `key` from the v=3 `secureItems` map, if
+    /// present. No-op when absent. Mirrors Android
+    /// `SecureStorage.removeSecureItem(key, password)`.
+    public static func removeSecureItem(key: String, password: String,
+        onPhase: WriteVerifyPhaseCallback? = nil) throws {
+        try setFlag(password: password, onPhase: onPhase) { sb in
+            try sb.snapshotByRemovingSecureItem(key)
         }
     }
 
@@ -1611,7 +1673,6 @@ public enum UnlockCoordinatorV2 {
         let tagStart = combined.count - 16
         let ct = combined.prefix(tagStart)
         let tag = combined.suffix(16)
-        // (notes for reviewers):
 // the `alg` literal is "AES-GCM" exactly,
         // matching the canonical schema invariant enforced by
         // `StrongboxFileCodec.AeadEnvelope.expectedAlg`. A

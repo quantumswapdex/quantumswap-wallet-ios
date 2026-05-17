@@ -14,7 +14,6 @@
 // Android reference:
 // app/src/main/java/com/quantumcoinwallet/app/model/BlockchainNetwork.java
 // app/src/main/java/com/quantumcoinwallet/app/utils/GlobalMethods.java (setActiveNetwork)
-//
 // Concurrency discipline (the hardening of the security fix plan, closes
 // the prior race / durability gaps):
 // `BlockchainNetworkManager` mirrors the NSLock + private-storage
@@ -40,6 +39,25 @@ public extension Notification.Name {
     /// `resetToBundled`). Subscribers (e.g. `HomeViewController`) use
     /// it to refresh chrome that displays the active-network name.
     static let networkConfigDidChange = Notification.Name("networkConfigDidChange")
+    /// Posted by `HomeMainViewController.handlePullToRefresh` so the
+    /// hosting `HomeViewController` re-issues its native balance
+    /// fetch in lockstep with the table's page-1 reload. Keeps the
+    /// two controllers decoupled exactly like `.networkConfigDidChange`
+    /// (mirror of Android's broadcast-driven cross-fragment refresh).
+    static let walletHomeRefreshRequested = Notification.Name("walletHomeRefreshRequested")
+}
+
+public extension CodingUserInfoKey {
+    /// Decoder-scoped flag that controls whether
+    /// `BlockchainNetwork.init(from:)` rewrites `scanApiDomain` /
+    /// `blockExplorerDomain` through `ensureHttps`. Set to `false`
+    /// when decoding a strongbox payload so the bytes the user typed
+    /// (or that Android wrote) survive a round-trip without being
+    /// mutated; the Add-Network entry form, which legitimately
+    /// normalises bare hostnames into `https://...`, keeps the
+    /// default `true` behavior.
+    static let blockchainNetworkRewriteUrls = CodingUserInfoKey(
+        rawValue: "BlockchainNetwork.rewriteUrls")!
 }
 
 public struct BlockchainNetwork: Codable, Equatable, Sendable {
@@ -107,18 +125,42 @@ public struct BlockchainNetwork: Codable, Equatable, Sendable {
             self.chainId = ""
         }
 
+        // Strongbox-decoded payloads opt out of URL rewriting via
+        // `userInfo[.blockchainNetworkRewriteUrls] = false` so the
+        // bytes on disk round-trip without mutation (preserves byte
+        // parity with Android-written strongbox slots). The Add-
+        // Network entry form uses the default `true` so a bare
+        // hostname typed by the user is normalised to `https://`.
+        let rewriteUrls = (decoder.userInfo[.blockchainNetworkRewriteUrls] as? Bool) ?? true
+
         let scanRaw = (try? c.decodeIfPresent(String.self, forKey: .scanApiDomain)) ?? ""
-        self.scanApiDomain = Self.ensureHttps(scanRaw)
+        self.scanApiDomain = rewriteUrls ? Self.ensureHttps(scanRaw) : scanRaw
 
         self.rpcEndpoint = (try? c.decodeIfPresent(String.self, forKey: .rpcEndpoint)) ?? ""
 
         if let url = try? c.decodeIfPresent(String.self, forKey: .blockExplorerUrl), !url.isEmpty {
             self.blockExplorerUrl = url
         } else if let domain = try? c.decodeIfPresent(String.self, forKey: .blockExplorerDomain) {
-            self.blockExplorerUrl = Self.ensureHttps(domain)
+            self.blockExplorerUrl = rewriteUrls ? Self.ensureHttps(domain) : domain
         } else {
             self.blockExplorerUrl = ""
         }
+    }
+
+    /// Convenience constructor used by the strongbox decode path to
+    /// build a `BlockchainNetwork` from `customNetworks` JSON without
+    /// rewriting `scanApiDomain` / `blockExplorerDomain` via
+    /// `ensureHttps`. Preserves the bytes on disk so an iOS-written
+    /// slot stays byte-identical to the equivalent Android-written
+    /// slot. Used internally by `StrongboxPayload`; the rest of the
+    /// codebase can keep using `JSONDecoder().decode(BlockchainNetwork.self, ...)`
+    /// for the entry-form / bundled-defaults paths.
+    public static func decodeRaw(from decoder: Decoder) throws -> BlockchainNetwork {
+        // Bridge via the existing `init(from:)` so we share the
+        // chainId/name fallback ladder. The `rewriteUrls = false`
+        // flag is propagated through `decoder.userInfo` by the
+        // outer `StrongboxPayload` decoder.
+        return try BlockchainNetwork(from: decoder)
     }
 
     /// Custom encoder writes ONLY the iOS-shaped keys so the encrypted
@@ -141,7 +183,7 @@ public struct BlockchainNetwork: Codable, Equatable, Sendable {
     /// scheme so the rest of the iOS stack (`ApiClient.basePath`,
     /// `Constants.SCAN_API_URL`, block-explorer deeplinks) keeps
     /// working.
-    /// hardening (notes for reviewers): /// The entry-form validator (`BlockchainNetworkViewController
+    /// hardening: /// The entry-form validator (`BlockchainNetworkViewController
     /// .isValidScanLikeDomain`) rejects `http://` outright as the
     /// primary gate. This model-layer transform is a defense-in-depth
     /// floor: if any code path EVER manages to flow an `http://` URL
@@ -298,7 +340,6 @@ public final class BlockchainNetworkManager: @unchecked Sendable {
     /// before invoking this method. The in-memory `_activeIndex` is
     /// rolled back if the persist fails so a wrong-password retry
     /// doesn't desync memory from disk.
-    /// (notes for reviewers):
     /// the `_stateLock` is held across the entire mutation pipeline
     /// INCLUDING the rollback-on-throw branch. Without this, a
     /// concurrent reader could observe the half-rolled-back state
@@ -332,7 +373,6 @@ public final class BlockchainNetworkManager: @unchecked Sendable {
     /// persist failure the new entry is rolled back so the in-memory
     /// `_networks` list stays in lock-step with disk, allowing the user
     /// to retry the unlock prompt without duplicating the entry.
-    /// (notes for reviewers):
     /// the `_stateLock` is held across `_networks.append` AND the
     /// rollback `removeLast` so a concurrent reader cannot witness
     /// a duplicated trailing entry. A double-tap on the "Save" button
@@ -414,7 +454,6 @@ public final class BlockchainNetworkManager: @unchecked Sendable {
 
     /// PRECONDITION: `_stateLock` MUST be held by the caller. Renamed
     /// from `applyActive()` to reflect the held-lock contract.
-    /// (notes for reviewers):
     /// this method publishes the new network into THREE sinks in the
     /// same critical section so a synchronous reader cannot observe
     /// a torn view (Constants says new network, NetworkConfig still

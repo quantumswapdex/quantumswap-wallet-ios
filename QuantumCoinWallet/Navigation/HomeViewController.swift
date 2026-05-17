@@ -67,15 +67,19 @@ public final class HomeViewController: UIViewController {
     /// `RunLoop.main` instead of a dedicated background thread.
     /// Balance only -- the token list is event-driven (load / wallet
     /// change / network change).
-    /// The interval is 10s while the app is foregrounded and slows
-    /// to 300s when backgrounded. iOS will eventually suspend the
-    /// process while it's in the background, but as long as the
-    /// process keeps running (e.g. while the user is in the app
-    /// switcher) the slower cadence keeps it from hammering the
-    /// scan API.
+    ///
+    /// Each tick samples a fresh interval from a uniform range so the
+    /// public RPC sees a more even distribution of requests and no
+    /// individual device falls into a predictable polling rhythm: the
+    /// foreground app reschedules within [7s, 15s] and the
+    /// backgrounded app reschedules within [60s, 120s]. iOS will
+    /// eventually suspend the process while it's in the background,
+    /// but as long as the process keeps running (e.g. while the user
+    /// is in the app switcher) the slower cadence keeps it from
+    /// hammering the scan API.
     private var balanceTimer: Timer?
-    private static let foregroundInterval: TimeInterval = 10
-    private static let backgroundInterval: TimeInterval = 300
+    private static let foregroundIntervalRange: ClosedRange<TimeInterval> = 7...15
+    private static let backgroundIntervalRange: ClosedRange<TimeInterval> = 60...120
 
     /// Re-entrancy guard for automatic balance refreshes so a slow
     /// poll can't stack repeated requests on top of each other.
@@ -199,8 +203,17 @@ public final class HomeViewController: UIViewController {
             selector: #selector(handleAppWillEnterForeground),
             name: UIApplication.willEnterForegroundNotification,
             object: nil)
+        // Pull-to-refresh on `HomeMainViewController.table` posts this
+        // so the host controller re-issues the balance fetch in
+        // lockstep with the token table reload. Kept decoupled via
+        // NotificationCenter exactly like `.networkConfigDidChange`.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleWalletHomeRefreshRequested),
+            name: .walletHomeRefreshRequested,
+            object: nil)
 
-        scheduleBalanceTimer(interval: Self.foregroundInterval)
+        scheduleNextBalanceTick()
     }
 
     deinit {
@@ -208,31 +221,53 @@ public final class HomeViewController: UIViewController {
         NotificationCenter.default.removeObserver(self)
     }
 
-    /// (Re)create the periodic balance-refresh timer at the supplied
-    /// interval. Always invalidates the previous timer first so a
-    /// foreground/background flip never leaves two timers ticking.
-    /// Scheduled on `.common` mode so active scroll/tracking
-    /// gestures don't pause the tick.
-    private func scheduleBalanceTimer(interval: TimeInterval) {
+    /// Schedule the next auto-refresh tick with a uniformly-random
+    /// interval sampled from the foreground or background range
+    /// depending on the live `applicationState`. Always invalidates
+    /// the previous timer first so a foreground/background flip
+    /// never leaves two timers ticking. Scheduled on `.common` mode
+    /// so active scroll/tracking gestures do not pause the tick.
+    /// When the tick fires it kicks `refreshBalance(manual: false)`
+    /// and then re-schedules itself with a freshly-sampled interval -
+    /// the recursive sampling is what gives the foreground app the
+    /// [7s, 15s] uniform-random cadence (and [60s, 120s] backgrounded).
+    private func scheduleNextBalanceTick() {
         balanceTimer?.invalidate()
+        let range = (UIApplication.shared.applicationState == .active)
+            ? Self.foregroundIntervalRange
+            : Self.backgroundIntervalRange
+        let interval = TimeInterval.random(in: range)
         let t = Timer.scheduledTimer(
-            withTimeInterval: interval, repeats: true) { [weak self] _ in
-            self?.refreshBalance(manual: false)
+            withTimeInterval: interval, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            self.refreshBalance(manual: false)
+            self.scheduleNextBalanceTick()
         }
         RunLoop.main.add(t, forMode: .common)
         balanceTimer = t
     }
 
     @objc private func handleAppDidEnterBackground() {
-        scheduleBalanceTimer(interval: Self.backgroundInterval)
+        // Re-sample so the next interval lands in the slower
+        // backgrounded range. The in-flight tick is left alone -
+        // the next one will already use the new range.
+        scheduleNextBalanceTick()
     }
 
     @objc private func handleAppWillEnterForeground() {
-        scheduleBalanceTimer(interval: Self.foregroundInterval)
-        // Immediate one-off refresh so the user doesn't stare at a
-        // potentially-stale balance for the first 10s after returning
-        // to the app.
+        // Re-sample into the faster foreground range and kick an
+        // immediate one-off refresh so the user does not stare at a
+        // potentially-stale balance for the first sampled interval
+        // after returning to the app.
+        scheduleNextBalanceTick()
         refreshBalance(manual: false)
+    }
+
+    /// Pull-to-refresh dispatch from `HomeMainViewController`. Treat
+    /// as a manual refresh so the user sees an error dialog if the
+    /// balance fetch fails (the existing balance label is preserved).
+    @objc private func handleWalletHomeRefreshRequested() {
+        refreshBalance(manual: true)
     }
 
     @objc private func handleNetworkConfigDidChange() {
@@ -411,6 +446,14 @@ public final class HomeViewController: UIViewController {
                 await MainActor.run {
                     wait?.dismiss(animated: true) {
                         if err == nil {
+                            // First successful unlock is the moment
+                            // Android starts its notification thread;
+                            // mirror by asking for notification
+                            // permission here. Calls are idempotent -
+                            // iOS short-circuits the prompt once the
+                            // user has answered.
+                            BalanceChangeNotifier.shared
+                                .requestAuthorizationIfNeeded()
                             dlg?.dismiss(animated: true) {
                                 self?.showMain()
                             }
@@ -589,12 +632,6 @@ public final class HomeViewController: UIViewController {
             case .wallets:
             lastSelectedTab = .wallets
             beginTransactionNow(WalletsViewController()); apply(.innerFragment)
-            case .help:
-            if let u = URL(string: Constants.DP_DOCS_URL) {
-                UIApplication.shared.open(u)
-            }
-            case .blockExplorer:
-            openBlockExplorer()
             case .settings:
             // Capture the current primary tab so `popFromSettings`
             // knows where back should land, then route into Settings.
@@ -710,10 +747,17 @@ public final class HomeViewController: UIViewController {
                 let resp = try await AccountsApi.accountBalance(address: address)
                 await MainActor.run {
                     guard let self = self else { return }
-                    self.centerStripView.setBalance(
-                        CoinUtils.formatWei(resp.result?.balance))
+                    let formatted = CoinUtils.formatWei(resp.result?.balance)
+                    self.centerStripView.setBalance(formatted)
                     self.centerStripView.setBalance(loading: false)
                     self.balanceLoading = false
+                    // Background balance-change notifier: seed the
+                    // cache on the first observation, fire a system
+                    // notification on subsequent changes while the
+                    // app is not in the foreground. Mirrors Android's
+                    // `notificationThread` previous-vs-current diff.
+                    BalanceChangeNotifier.shared.observeBalance(
+                        formatted, address: address)
                 }
             } catch {
                 await MainActor.run {

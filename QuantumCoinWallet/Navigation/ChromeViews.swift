@@ -185,8 +185,11 @@ public final class CenterStripView: UIView {
     private let balanceLabel = UILabel()
     private let copyButton = UIButton(type: .system)
     private let exploreButton = UIButton(type: .system)
-    private let refreshButton = UIButton(type: .system)
-    private let progress = UIActivityIndicatorView(style: .medium)
+    /// In-place icon/spinner swap matching Android's `ProgressBar`
+    /// swap-in / swap-out on the address strip's refresh button.
+    /// Replaces the separate `progress` indicator that previously
+    /// rendered below `balanceLabel`.
+    private let refreshSwap = RefreshIconSwap(image: UIImage(named: "retry"))
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
@@ -202,6 +205,12 @@ public final class CenterStripView: UIView {
 
         balanceLabel.font = Typography.body(20)
         balanceLabel.textColor = .label
+        // Show the "unknown balance" dash placeholder until the first
+        // successful fetch on the post-unlock home screen. Mirrors the
+        // Android `home_activity.xml` initial `-` glyph so users see a
+        // consistent value rather than an empty pill while the network
+        // call is in flight.
+        balanceLabel.text = CoinUtils.UNKNOWN_BALANCE_PLACEHOLDER
 
         // All three address-action icons use the same 5pt inset so
         // their artworks render at matching sizes. The Android source
@@ -214,14 +223,18 @@ public final class CenterStripView: UIView {
             inset: 5, action: #selector(tapCopy))
         configureIcon(exploreButton, image: "address_explore",
             inset: 5, action: #selector(tapExplore))
-        configureIcon(refreshButton, image: "retry",
-            inset: 5, action: #selector(tapRefresh))
+        refreshSwap.onTap = { [weak self] in self?.onRefresh?() }
+        refreshSwap.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            refreshSwap.widthAnchor.constraint(equalToConstant: 40),
+            refreshSwap.heightAnchor.constraint(equalToConstant: 40)
+        ])
 
         // Center the three address-action icons in their own horizontal
         // stack mirroring Android `home_activity.xml:136-200`.
         let iconRow = UIStackView(arrangedSubviews: [copyButton,
                 exploreButton,
-                refreshButton])
+                refreshSwap])
         iconRow.axis = .horizontal
         iconRow.spacing = 24
         iconRow.alignment = .center
@@ -238,7 +251,7 @@ public final class CenterStripView: UIView {
         balanceRule.heightAnchor.constraint(equalToConstant: 1).isActive = true
 
         let stack = UIStackView(arrangedSubviews: [
-                addressLabel, iconRow, balanceLabel, progress, balanceRule, cardRow
+                addressLabel, iconRow, balanceLabel, balanceRule, cardRow
             ])
         stack.axis = .vertical
         stack.alignment = .center
@@ -247,7 +260,7 @@ public final class CenterStripView: UIView {
         addSubview(stack)
         // Android pads the rule with 20dp above and below; replicate
         // the breathing room with custom spacing on the stack.
-        stack.setCustomSpacing(20, after: progress)
+        stack.setCustomSpacing(20, after: balanceLabel)
         stack.setCustomSpacing(20, after: balanceRule)
         NSLayoutConstraint.activate([
                 stack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
@@ -279,8 +292,11 @@ public final class CenterStripView: UIView {
     required init?(coder: NSCoder) { fatalError() }
 
     public func setBalance(_ text: String) { balanceLabel.text = text }
+    /// Toggles the refresh-icon-swap (icon vs. spinner) on the
+    /// address strip. Mirrors the Android in-place swap on the
+    /// home address bar refresh button.
     public func setBalance(loading: Bool) {
-        if loading { progress.startAnimating() } else { progress.stopAnimating() }
+        refreshSwap.setLoading(loading)
     }
 
     @objc private func tapCopy() {
@@ -289,7 +305,6 @@ public final class CenterStripView: UIView {
         Toast.showMessage(Localization.shared.getCopiedByLangValues())
     }
     @objc private func tapExplore() { onExploreAddress?() }
-    @objc private func tapRefresh() { onRefresh?() }
     @objc private func tapSend() { onSend?() }
     @objc private func tapReceive() { onReceive?() }
     @objc private func tapTransactions() { onTransactions?() }
@@ -456,7 +471,7 @@ public final class OfflineOverlayView: UIView {
 
 public final class BottomNavView: UIView {
 
-    public enum Tab { case wallets, help, blockExplorer, settings }
+    public enum Tab { case wallets, settings }
 
     public var onSelect: ((Tab) -> Void)?
 
@@ -468,28 +483,32 @@ public final class BottomNavView: UIView {
         // collapses to the surface color in both themes).
         backgroundColor = .clear
         let L = Localization.shared
-        // Match Android `menu/home_bottom_navigation.xml`:
-        // Wallets / Help / Block Explorer / Settings. Icons sourced
-        // from the `m_*` template imagesets so they tint with
+        // Two-tab bottom nav: Wallets + Settings. Icons sourced from
+        // the `m_*` template imagesets so they tint with
         // `colorCommon6` and read identically in light / dark mode.
         let b1 = makeTab("m_wallets", title: L.getWalletsByLangValues(), tag: 0)
-        let b2 = makeTab("m_help", title: L.getHelpByLangValues(), tag: 1)
-        let b3 = makeTab("m_block_explorer", title: L.getBlockExplorerTitleByLangValues(), tag: 2)
         let b4 = makeTab("m_settings", title: L.getSettingsByLangValues(), tag: 3)
-        let stack = UIStackView(arrangedSubviews: [b1, b2, b3, b4])
+        let stack = UIStackView(arrangedSubviews: [b1, b4])
         stack.axis = .horizontal
         stack.distribution = .fillEqually
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
+        // Constrain the two-tab cluster to the centre half of the
+        // bottom-nav strip rather than spreading the icons edge-to-
+        // edge. With `.fillEqually` each tab then occupies a quarter
+        // of the strip width and the two icons centre around the
+        // 3/8 and 5/8 marks - visually tucked together near the
+        // middle, matching the user-requested layout after removing
+        // the Help and Block Explorer tabs.
         NSLayoutConstraint.activate([
                 stack.topAnchor.constraint(equalTo: topAnchor),
                 stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-                stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-                stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+                stack.centerXAnchor.constraint(equalTo: centerXAnchor),
+                stack.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.5),
                 heightAnchor.constraint(equalToConstant: 56)
             ])
 
-        // Apply alpha-dim press feedback to all four tab UIControls.
+        // Apply alpha-dim press feedback to all tab UIControls.
         installPressFeedbackRecursive()
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -548,8 +567,6 @@ public final class BottomNavView: UIView {
         let tab: Tab
         switch tag {
             case 0: tab = .wallets
-            case 1: tab = .help
-            case 2: tab = .blockExplorer
             default: tab = .settings
         }
         onSelect?(tab)

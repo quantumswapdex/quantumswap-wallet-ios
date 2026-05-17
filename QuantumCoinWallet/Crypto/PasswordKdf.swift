@@ -7,7 +7,7 @@
 // treat scrypt as an abstract "password -> 32-byte derived
 // key" function without having to know about the JS bridge
 // envelope shape.
-// Why this exists (notes for reviewers):
+// Why this exists:
 // The scrypt parameters are mandatory cross-platform
 // constants (see `JsBridge.SCRYPT_N/R/P/KEY_LEN`). Any
 // change to N, r, p, or keyLen breaks every existing
@@ -52,8 +52,8 @@ public enum PasswordKdf {
 
     /// Derive a 32-byte key from `password` using scrypt with
     /// `JsBridge`'s pinned (N, r, p, keyLen) parameters. The
-    /// salt MUST be the 16-byte CSPRNG-generated salt stored in
-    /// the v2 codec's `kdf.salt` field, presented as base64.
+    /// salt MUST be the 32-byte CSPRNG-generated salt stored in
+    /// the v3 codec's `kdf.salt` field, presented as base64.
     /// Threading: BACKGROUND-thread only (JsBridge precondition).
     public static func deriveMainKey(password: String,
         saltBase64: String) throws -> Data {

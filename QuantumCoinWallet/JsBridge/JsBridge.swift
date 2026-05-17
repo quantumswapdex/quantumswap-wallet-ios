@@ -16,8 +16,6 @@
 // All blocking wrappers on this class MUST be called from a background
 // queue. Calling from the main thread will trap with
 // `preconditionFailure`. Use the async wrappers from UI code.
-//
-// (notes for reviewers):
 // the wallet-creation, wallet-decrypt, and signing call shapes use
 // the binary channel `JsEngine.storePendingPayloadBinary` /
 // `consumePendingResultBinary` for `privateKeyBytes` and
@@ -340,6 +338,40 @@ public final class JsBridge: @unchecked Sendable {
         }
     }
 
+    /// Encrypts the wallet directly from raw signing-key bytes
+    /// instead of a seed phrase. Used for the key-only wallet
+    /// category (no recoverable BIP39 phrase) so the export
+    /// flow stays in lockstep with the Android sibling, where
+    /// `CloudBackupManager.encryptWallet` switches to the
+    /// `{privateKey, publicKey}` branch whenever the wallet's
+    /// stored `seed` field is empty. The bytes are staged on
+    /// the binary channel (NOT in the JSON envelope) and the
+    /// `walletInput` JSON carries only the `fromBinaryKeys`
+    /// discriminator that `bridge.html#encryptWalletJson`
+    /// inspects (see the `input.fromBinaryKeys === true`
+    /// branch). The bridge zeroes the staged byte slots in its
+    /// own `finally` block; callers should still `resetBytes`
+    /// any locally-held copy of the key material as soon as
+    /// this call returns.
+    @discardableResult
+    public func encryptWalletJson(privateKey: Data, publicKey: Data,
+        password: String) throws -> String {
+        try blockingCall { cb, rid in
+            try JsEngine.shared.storePendingPayloadBinary(
+                requestId: rid, key: "privKey", data: privateKey)
+            try JsEngine.shared.storePendingPayloadBinary(
+                requestId: rid, key: "pubKey", data: publicKey)
+            let payload: [String: Any] = [
+                "walletInput": "{\"fromBinaryKeys\":true}",
+                "password": password
+            ]
+            let json = try Self.jsonString(payload)
+            JsEngine.shared.registerCallback(requestId: rid, callback: cb)
+            try JsEngine.shared.storePendingPayload(requestId: rid, json: json)
+            JsEngine.shared.evaluate("bridge.encryptWalletJson('\(rid)')")
+        }
+    }
+
     public func decryptWalletJson(walletJson: String,
         password: String) throws -> WalletEnvelope {
         let rid = UUID().uuidString.lowercased()
@@ -408,7 +440,6 @@ public final class JsBridge: @unchecked Sendable {
 
     /// scrypt-derive via the JS bundle. Returns the raw bridge envelope -
     /// callers should decode the nested `data.key` base64.
-    /// (notes for reviewers):
     /// both the Swift caller and the JS handler enforce a
     /// minimum bound on the scrypt parameters. Belt-and-braces:
     /// the Swift `precondition` makes weakening at a Swift call

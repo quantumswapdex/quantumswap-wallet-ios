@@ -196,8 +196,18 @@ public final class Localization {
     public func getRestoreSummaryStatusSkippedByLangValues() -> String { langString("restore-summary-status-skipped") }
     public func getRestoreSummaryStatusAlreadyExistsByLangValues() -> String { langString("restore-summary-status-already-exists") }
     public func getRestoreTryDifferentPasswordByLangValues() -> String { langString("restore-try-different-password") }
+    public func getRestoreStrongboxWriteFailedByLangValues() -> String { langString("restore-strongbox-write-failed") }
     public func getRestoreProgressOfByLangValues() -> String { langString("restore-progress-of") }
     public func getRestorePartialProgressByLangValues() -> String { langString("restore-partial-progress") }
+    /// Wait-dialog message shown during the multi-wallet decrypt phase
+    /// of the cloud-restore batch flow (`RestoreFlow.runDecryptPass`).
+    /// Distinct from `waitWalletOpen` because the batch decrypt of N
+    /// wallets stacks scrypt cost across slots and can run for many
+    /// minutes on weak devices, whereas the single-wallet wording
+    /// promises "up to a minute".
+    public func getRestoreWalletsDecryptingByLangValues() -> String {
+        langString("restore-wallets-decrypting")
+    }
     public func getCameraPermissionDeniedByLangValues() -> String { langString("camera-permission-denied") }
     public func getBackupToCloudByLangValues() -> String { langString("backup-to-cloud") }
     public func getCloudBackupInfoByLangValues() -> String { langString("cloud-backup-info") }
@@ -274,6 +284,17 @@ public final class Localization {
     public func getConfirmWalletByLangValues() -> String { langString("confirm-wallet") }
     public func getConfirmWalletDescriptionByLangValues() -> String { langString("confirm-wallet-description") }
     public func getEnterSeedWordsByLangValues() -> String { langString("enter-seed-words") }
+    /// Title shown in the system notification that fires when the
+    /// polled balance changes between background ticks.
+    public func getNotificationTitleByLangValues() -> String { langString("notification-title") }
+    /// Body prefix appended with the new formatted balance in the
+    /// background balance-change notification.
+    public func getNotificationDescriptionByLangValues() -> String { langString("notification-description") }
+    /// Android-channel concepts retained in the catalog for parity
+    /// even though iOS does not expose user-visible notification
+    /// channels.
+    public func getNotificationChannelNameByLangValues() -> String { langString("notification-channel-name") }
+    public func getNotificationChannelDescriptionByLangValues() -> String { langString("notification-channel-description") }
 
     // MARK: - errors getters
 
@@ -287,4 +308,38 @@ public final class Localization {
     public func getQuantumAddrByErrors() -> String { errString("quantumAddr") }
     public func getWalletPasswordNotSetByErrors() -> String { errString("wallet-password-not-set") }
     public func getEmptyPasswordByErrors() -> String { errString("emptyPassword") }
+    /// Friendly user-facing copy for `UnlockCoordinatorV2Error.tamperDetected`.
+    /// Replaces the developer-facing description so the user sees a
+    /// readable explanation when stale / structurally-invalid
+    /// strongbox slot files (typically left over from a previous
+    /// build on dev simulators) prevent a brand-new wallet from being
+    /// created. No automatic recovery is offered - the user reinstalls
+    /// the app to wipe the unreadable bytes, then retries.
+    public func getWalletDataUnreadableByErrors() -> String { errString("wallet-data-unreadable") }
+    /// Lockout copy reused across the password retry screens; the
+    /// matching Android entries live in
+    /// `app/src/main/res/raw/en_us.json`. `[SECONDS]` / `[MINUTES]`
+    /// placeholders are filled in by the caller.
+    public func getUnlockTooManyAttemptsSecondsByErrors() -> String { errString("unlock-too-many-attempts-seconds") }
+    public func getUnlockTooManyAttemptsOneMinuteByErrors() -> String { errString("unlock-too-many-attempts-one-minute") }
+    public func getUnlockTooManyAttemptsMinutesByErrors() -> String { errString("unlock-too-many-attempts-minutes") }
+    /// "Add Network" validation copy. Mirrors the Android
+    /// `BlockchainNetworkAddFragment.*` ViewModel accessors so the
+    /// English text is identical between the two platforms.
+    public func getNetworkRpcMustBeHttpsByErrors() -> String { errString("network-rpc-must-be-https") }
+    public func getNetworkRpcInvalidHostByErrors() -> String { errString("network-rpc-invalid-host") }
+    public func getNetworkScanInvalidHostByErrors() -> String { errString("network-scan-invalid-host") }
+    public func getNetworkExplorerInvalidHostByErrors() -> String { errString("network-explorer-invalid-host") }
+    public func getNetworkNameFormatByErrors() -> String { errString("network-name-format") }
+    public func getNetworkIdPositiveIntegerByErrors() -> String { errString("network-id-positive-integer") }
+    /// Used by the duplicate-name warning shown when the user tries
+    /// to add a network whose `name` matches an existing entry.
+    /// `[NAME]` placeholder is filled in by the caller.
+    public func getNetworkDuplicateNameByErrors() -> String { errString("network-duplicate-name") }
+    public func getNetworkSecureStorageUnavailableByErrors() -> String { errString("network-secure-storage-unavailable") }
+    public func getNetworkAddSuccessByErrors() -> String { errString("network-add-success") }
+    /// Generic fallback used by the reveal-wallet flow when the user
+    /// password decrypts the slot but key derivation does not yield a
+    /// usable wallet entry.
+    public func getRevealWalletErrorGenericByErrors() -> String { errString("reveal-wallet-error-generic") }
 }

@@ -5,8 +5,7 @@
 // - `applicationDidBecomeActive` compares against the last unlock
 // timestamp and locks + presents the unlock dialog if the budget
 // elapsed or the clock went backwards.
-//
-// (notes for reviewers): the
+// the
 // elapsed-time arithmetic uses `mach_continuous_time()` (continuous
 // nanoseconds since boot, including device-suspended time), NOT
 // the wall-clock `CFAbsoluteTimeGetCurrent()`. The wall clock is
@@ -29,7 +28,6 @@
 // countdown is acceptable on the wall clock - it only fires while
 // the app is foregrounded, and `applicationWillResignActive`
 // cancels it on suspend.
-// (notes for reviewers):
 // The original implementation installed only a `UITapGestureRecognizer`
 // on the key window. The comment "any UI interaction" was therefore
 // misleading: a user reading a long transaction list could swipe-
@@ -192,7 +190,6 @@ public final class SessionLock {
     /// handle architectures where 1 mach tick != 1 ns; on modern
     /// A-series chips numer == denom == 1 and the conversion is a
     /// no-op.
-    /// (notes for reviewers):
     /// this primitive is a copy of `UnlockAttemptLimiter.monotonicNanos()`
     /// with the same overflow-safe split arithmetic for non-1:1
     /// timebases.

@@ -3,7 +3,7 @@
 // `JsEngine` loads into `WKWebView`. Re-hashes the loaded bundle on
 // first use and compares against the build-time SHA-256 embedded by
 // `scripts/embed_bundle_hash.sh` into `BundleHash_Generated.swift`.
-// Why this exists (notes for reviewers):
+// Why this exists:
 // The JS bundle owns every signing primitive in the wallet
 // (scrypt KDF, AES-GCM envelope, EIP-155 transaction signing).
 // Prior reviews flagged that the bundle is loaded

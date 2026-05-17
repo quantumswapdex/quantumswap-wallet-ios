@@ -2,7 +2,7 @@
 // Single source of truth for every URL the app
 // composes from a base + an attacker-influenceable string segment
 // (a wallet address, a token-contract address, a transaction hash).
-// Why this exists (notes for reviewers):
+// Why this exists:
 // The app composes block-explorer URLs and API URLs by direct
 // string concatenation:
 // Constants.BLOCK_EXPLORER_URL +
@@ -29,7 +29,6 @@
 // type (address: `^0x[0-9a-fA-F]{64}$` — QuantumCoin
 // addresses are 32 bytes / 64 hex characters; tx hash:
 // `^0x[0-9a-fA-F]{64}$`).
-// (notes for reviewers):
 // the previous header docstring referenced the
 // Ethereum `^0x[0-9a-fA-F]{40}$` (20-byte) address shape,
 // which is wrong for QuantumCoin: the address validator

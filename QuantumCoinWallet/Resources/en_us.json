@@ -172,8 +172,10 @@
       "restore-summary-status-skipped": "Skipped",
       "restore-summary-status-already-exists": "Already exists",
       "restore-try-different-password": "Unable to decrypt any wallet with that password. Try with a different password.",
+      "restore-strongbox-write-failed": "The backup file decrypted successfully, but it could not be saved to your device's wallet store. The wallet password you entered earlier does not match the password protecting this device. Cancel and start the restore again, then enter the device wallet password when asked.",
       "restore-progress-of": "[CURRENT] of [TOTAL]",
       "restore-partial-progress": "[COUNT] wallet(s) were restored. Enter password for the remaining.",
+      "restore-wallets-decrypting": "Please wait while your wallet(s) are being decrypted and restored; this can take many minutes.",
       "camera-permission-denied": "Camera access has been blocked. Open Settings and grant the Camera permission to scan QR codes.",
       "backup-to-cloud": "Backup to cloud",
       "cloud-backup-info": "Pick a folder in iCloud Drive (or any cloud-synced folder) to use for wallet backups. Tap Open after selecting the folder; future backups will be saved there automatically. iCloud Drive is available from the picker sidebar.",
@@ -223,7 +225,11 @@
       "transaction-id": "Transaction ID",
       "transaction-message-exits": "A transaction request is already in progress.",
       "show-password": "Show password",
-      "hide-password": "Hide password"
+      "hide-password": "Hide password",
+      "notification-title": "Quantum Coin",
+      "notification-description": "Balance changed in wallet",
+      "notification-channel-name": "Quantum Coin Wallet",
+      "notification-channel-description": "You are about to create to a quantum resistant wallet."
     },
     "errors": {
       "selectOption": "Please select an option.",
@@ -235,6 +241,23 @@
       "enterAmount": "Please enter the amount to send correctly.",
       "quantumAddr": "Please enter a valid address.",
       "wallet-password-not-set": "Wallet password is not set.",
-      "emptyPassword": "Please enter password"
+      "emptyPassword": "Please enter password",
+      "seed-word-empty": "Please enter the seed word in [LABEL].",
+      "seed-word-invalid": "The word in [LABEL] is not a valid seed word.",
+      "seed-word-mismatch": "The word in [LABEL] does not match the original seed word.",
+      "wallet-data-unreadable": "Existing wallet data on this device is unreadable and cannot be used. Please reinstall the app to clear the data, then try again.",
+      "unlock-too-many-attempts-seconds": "Too many failed attempts. Please wait [SECONDS] seconds and try again.",
+      "unlock-too-many-attempts-one-minute": "Too many failed attempts. Please wait 1 minute and try again.",
+      "unlock-too-many-attempts-minutes": "Too many failed attempts. Please wait [MINUTES] minutes and try again.",
+      "network-rpc-must-be-https": "RPC Endpoint must use https://",
+      "network-rpc-invalid-host": "RPC Endpoint URL is not a valid https host.",
+      "network-scan-invalid-host": "Scan API domain is not a valid hostname.",
+      "network-explorer-invalid-host": "Block explorer domain is not a valid hostname.",
+      "network-name-format": "Blockchain name must be 1-[MAX] letters/digits/_/-/space.",
+      "network-id-positive-integer": "Network ID must be a positive integer.",
+      "network-duplicate-name": "A network named \"[NAME]\" already exists.",
+      "network-secure-storage-unavailable": "Secure storage is unavailable; cannot save network.",
+      "network-add-success": "Added successfully!",
+      "reveal-wallet-error-generic": "Unable to reveal the wallet. Please check your password and try again."
     }
 }

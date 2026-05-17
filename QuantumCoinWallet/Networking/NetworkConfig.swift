@@ -2,7 +2,7 @@
 // Actor-backed network configuration with
 // a value-type `NetworkSnapshot` that signing call sites capture at
 // "Review" time and re-assert against at "Submit" time.
-// Why this exists (notes for reviewers):
+// Why this exists:
 // The legacy state lived in `Constants.SCAN_API_URL`,
 // `Constants.RPC_ENDPOINT_URL`, `Constants.BLOCK_EXPLORER_URL`,
 // and `Constants.CHAIN_ID` - all declared as

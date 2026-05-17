@@ -3,7 +3,7 @@
 // Owns the snapshot lifecycle (rebuilt on unlock, dropped on
 // relock) and exposes typed getters/setters for every wallet-
 // semantic field. Closes the call-site half of ``.
-// Why this exists (notes for reviewers):
+// Why this exists:
 // In an earlier shape of the app, every screen reached into
 // `PrefConnect` directly to read or write a wallet-meaningful
 // field. That made it structurally impossible to enforce the
@@ -42,9 +42,10 @@
 // Tradeoffs:
 // - The "single in-memory snapshot" model is read-fast,
 // write-slow: every mutation rebuilds and re-encrypts the
-// entire payload. With 's 32 KiB bucket and 's
-// two-slot rotation that is ~10-20 ms per write. User-
-// driven mutations are rare enough that this is invisible.
+// entire payload. With StrongboxPadding's 4 MiB bucket and
+// AtomicSlotWriter's two-slot rotation that is < ~50 ms per
+// write on modern iPhones. User-driven mutations are rare
+// enough that this is invisible.
 // - Snapshot is wiped on `clearSnapshot` (called from idle-
 // relock, sign-out, delete-all). After a wipe, every
 // accessor returns its empty-state value (empty array,
@@ -60,7 +61,6 @@
 // scrypt and zeroes the bytes on return.
 
 import Foundation
-import CryptoKit
 
 public final class Strongbox: @unchecked Sendable {
 
@@ -84,6 +84,18 @@ public final class Strongbox: @unchecked Sendable {
         lock.lock()
         _snapshot = payload
         lock.unlock()
+    }
+
+    /// Read-only view of the current snapshot, or `nil` while locked.
+    /// Used by speculative-mutator paths (notably
+    /// `UnlockCoordinatorV2.appendWallet`) to capture the prior
+    /// snapshot so they can roll back via `installSnapshot` if the
+    /// persist round-trip fails after the in-memory mutation has
+    /// already been installed. Lock-protected to match
+    /// `installSnapshot` / `clearSnapshot`.
+    public var snapshotOrNil: StrongboxPayload? {
+        lock.lock(); defer { lock.unlock() }
+        return _snapshot
     }
 
     /// Drop the in-memory snapshot. Called from idle-relock,
@@ -222,13 +234,35 @@ public final class Strongbox: @unchecked Sendable {
         return wallet(at: idx)?.address
     }
 
-    /// Encrypted seed envelope at an index. Returns `nil` for an
-    /// unknown index OR while locked. The envelope is the
-    /// JS-bridge AES-GCM payload that the bridge can re-decrypt
-    /// with the user's password to recover the raw seed/key
-    /// material; this accessor never sees the plaintext seed.
-    public func encryptedSeed(at idx: Int) -> String? {
-        return wallet(at: idx)?.encryptedSeed
+    /// Raw signing-key bytes at an index. Returns `nil` for an
+    /// unknown index OR while locked. After v2 the per-wallet
+    /// keys are stored in cleartext inside the strongbox
+    /// plaintext (the strongbox AEAD is the only encryption
+    /// layer); accessing them does not require re-prompting for
+    /// the user password.
+    public func privateKey(at idx: Int) -> Data? {
+        return wallet(at: idx)?.privateKey
+    }
+
+    /// Raw verifying-key bytes at an index. Same locking and
+    /// access rules as `privateKey(at:)`.
+    public func publicKey(at idx: Int) -> Data? {
+        return wallet(at: idx)?.publicKey
+    }
+
+    /// Seed phrase (comma-joined) for the wallet at `idx`.
+    /// Returns the empty string for a key-only-imported wallet
+    /// (`hasSeed == false`); returns `nil` for an unknown index
+    /// OR while locked.
+    public func seedWords(at idx: Int) -> String? {
+        return wallet(at: idx)?.seedWords
+    }
+
+    /// `true` when the wallet at `idx` was created from / restored
+    /// onto a seed phrase. Returns `nil` for an unknown index OR
+    /// while locked.
+    public func hasSeed(at idx: Int) -> Bool? {
+        return wallet(at: idx)?.hasSeed
     }
 
     /// Custom networks the user has added via the network
@@ -246,10 +280,11 @@ public final class Strongbox: @unchecked Sendable {
         return _snapshot?.activeNetworkIndex ?? 0
     }
 
-    public var backupEnabled: Bool {
-        lock.lock(); defer { lock.unlock() }
-        return _snapshot?.backupEnabled ?? false
-    }
+    // No `backupEnabled` accessor by design. The backup-enabled
+    // toggle is read directly from `PrefConnect`'s UserDefaults
+    // wrapper by `BackupExclusion`; routing it through a
+    // Strongbox-gated accessor would create a parity gap with the
+    // pre-unlock OS backup agent.
 
     public var cloudBackupFolderUri: String {
         lock.lock(); defer { lock.unlock() }
@@ -264,6 +299,22 @@ public final class Strongbox: @unchecked Sendable {
     public var cameraPermissionAskedOnce: Bool {
         lock.lock(); defer { lock.unlock() }
         return _snapshot?.cameraPermissionAskedOnce ?? false
+    }
+
+    /// Generic key->value secure items (e.g. saved per-address
+    /// signing passwords). Mirrors Android's
+    /// `SecureStorage.getSecureItem(_:)`. Returns `nil` for an
+    /// unknown key OR while locked.
+    public func secureItem(forKey key: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return _snapshot?.secureItems[key]
+    }
+
+    /// All currently-stored secureItems keys. Empty while
+    /// locked.
+    public var secureItemKeys: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return Array(_snapshot?.secureItems.keys ?? Dictionary<String, String>().keys)
     }
 
     /// Snapshot copy for read-only callers that need an
@@ -346,9 +397,10 @@ public final class Strongbox: @unchecked Sendable {
 
     /// Build a new snapshot with one of the boolean prefs
     /// flipped. Centralised so the checksum recomputation is
-    /// done in one place.
+    /// done in one place. The backup-enabled toggle is NOT a
+    /// payload field — it lives in UserDefaults and is written
+    /// directly by Settings (see `BackupExclusion.swift`).
     public func snapshotByChangingFlag(
-        backupEnabled: Bool? = nil,
         advancedSigning: Bool? = nil,
         cameraPermissionAskedOnce: Bool? = nil,
         cloudBackupFolderUri: String? = nil
@@ -357,11 +409,49 @@ public final class Strongbox: @unchecked Sendable {
         guard let cur = _snapshot else { throw Error.locked }
         return rebuildPayload(
             from: cur,
-            backupEnabled: backupEnabled ?? cur.backupEnabled,
             cloudBackupFolderUri: cloudBackupFolderUri ?? cur.cloudBackupFolderUri,
             advancedSigning: advancedSigning ?? cur.advancedSigning,
             cameraPermissionAskedOnce:
             cameraPermissionAskedOnce ?? cur.cameraPermissionAskedOnce)
+    }
+
+    // MARK: - secureItems mutation builder
+
+    /// Build a new snapshot with a single secureItems entry
+    /// inserted (overwriting any prior value at the same key).
+    /// Mirrors Android `SecureStorage.setSecureItem`.
+    public func snapshotBySettingSecureItem(_ key: String, value: String) throws -> StrongboxPayload {
+        lock.lock(); defer { lock.unlock() }
+        guard let cur = _snapshot else { throw Error.locked }
+        var items = cur.secureItems
+        items[key] = value
+        return Self.rebuildPayloadStatic(
+            wallets: cur.wallets,
+            currentWalletIndex: cur.currentWalletIndex,
+            customNetworks: cur.customNetworks,
+            activeNetworkIndex: cur.activeNetworkIndex,
+            cloudBackupFolderUri: cur.cloudBackupFolderUri,
+            advancedSigning: cur.advancedSigning,
+            cameraPermissionAskedOnce: cur.cameraPermissionAskedOnce,
+            secureItems: items)
+    }
+
+    /// Build a new snapshot with `key` removed from secureItems.
+    /// Returns the unmodified snapshot if the key is absent.
+    public func snapshotByRemovingSecureItem(_ key: String) throws -> StrongboxPayload {
+        lock.lock(); defer { lock.unlock() }
+        guard let cur = _snapshot else { throw Error.locked }
+        var items = cur.secureItems
+        items.removeValue(forKey: key)
+        return Self.rebuildPayloadStatic(
+            wallets: cur.wallets,
+            currentWalletIndex: cur.currentWalletIndex,
+            customNetworks: cur.customNetworks,
+            activeNetworkIndex: cur.activeNetworkIndex,
+            cloudBackupFolderUri: cur.cloudBackupFolderUri,
+            advancedSigning: cur.advancedSigning,
+            cameraPermissionAskedOnce: cur.cameraPermissionAskedOnce,
+            secureItems: items)
     }
 
     // MARK: - Initial-snapshot helper
@@ -375,10 +465,10 @@ public final class Strongbox: @unchecked Sendable {
             currentWalletIndex: 0,
             customNetworks: [],
             activeNetworkIndex: 0,
-            backupEnabled: false,
             cloudBackupFolderUri: "",
             advancedSigning: false,
-            cameraPermissionAskedOnce: false)
+            cameraPermissionAskedOnce: false,
+            secureItems: [:])
     }
 
     /// Construct a snapshot for a freshly-created strongbox that
@@ -386,14 +476,13 @@ public final class Strongbox: @unchecked Sendable {
     /// `UnlockCoordinatorV2.createNewStrongboxWithInitialWallet` so
     /// the first-launch bootstrap and the first-wallet-add can
     /// share a single atomic mutation transaction.
-    /// (notes for reviewers):
     /// the wallet's `idx` should match what `appendWallet` would
     /// have assigned (i.e. 0 for the first wallet) so a future
     /// `appendWallet` can compute `maxWalletIndex + 1` and not
     /// collide. This is the caller's responsibility because the
-    /// caller has already called `JsBridge.encryptWalletJson` for
-    /// this `Wallet.encryptedSeed` and changing the idx here would
-    /// require re-encryption.
+    /// caller has already derived the raw key bytes from the JS
+    /// bridge for this wallet and the idx is part of the
+    /// snapshot's wallet-map key.
     /// Cross-references:
     ///   - (atomic
     ///     bootstrap+append closes this).
@@ -404,10 +493,10 @@ public final class Strongbox: @unchecked Sendable {
             currentWalletIndex: wallet.idx,
             customNetworks: [],
             activeNetworkIndex: 0,
-            backupEnabled: false,
             cloudBackupFolderUri: "",
             advancedSigning: false,
-            cameraPermissionAskedOnce: false)
+            cameraPermissionAskedOnce: false,
+            secureItems: [:])
     }
 
     // MARK: - Errors
@@ -430,147 +519,238 @@ public final class Strongbox: @unchecked Sendable {
         currentWalletIndex: Int? = nil,
         customNetworks: [BlockchainNetwork]? = nil,
         activeNetworkIndex: Int? = nil,
-        backupEnabled: Bool? = nil,
         cloudBackupFolderUri: String? = nil,
         advancedSigning: Bool? = nil,
-        cameraPermissionAskedOnce: Bool? = nil
+        cameraPermissionAskedOnce: Bool? = nil,
+        secureItems: [String: String]? = nil
     ) -> StrongboxPayload {
         return Self.rebuildPayloadStatic(
             wallets: wallets ?? base.wallets,
             currentWalletIndex: currentWalletIndex ?? base.currentWalletIndex,
             customNetworks: customNetworks ?? base.customNetworks,
             activeNetworkIndex: activeNetworkIndex ?? base.activeNetworkIndex,
-            backupEnabled: backupEnabled ?? base.backupEnabled,
             cloudBackupFolderUri: cloudBackupFolderUri ?? base.cloudBackupFolderUri,
             advancedSigning: advancedSigning ?? base.advancedSigning,
             cameraPermissionAskedOnce:
-            cameraPermissionAskedOnce ?? base.cameraPermissionAskedOnce)
+            cameraPermissionAskedOnce ?? base.cameraPermissionAskedOnce,
+            secureItems: secureItems ?? base.secureItems)
     }
 
+    /// Build a v=3 snapshot with `checksum = ""` as a placeholder.
+    /// The actual checksum is keyed by `mainKey` and is therefore
+    /// only meaningful at persist time; the persist pipeline
+    /// (UnlockCoordinatorV2.persistSnapshot, deepVerifyStaged)
+    /// calls `Strongbox.stampChecksum(...)` to fill the field
+    /// before encoding for AEAD seal. Snapshots constructed
+    /// here pass through `Strongbox.shared.installSnapshot(...)`
+    /// where the placeholder is irrelevant because reads never
+    /// re-verify the checksum (the post-decrypt verifier did
+    /// that against the on-disk value).
     private static func rebuildPayloadStatic(
         wallets: [StrongboxPayload.Wallet],
         currentWalletIndex: Int,
         customNetworks: [BlockchainNetwork],
         activeNetworkIndex: Int,
-        backupEnabled: Bool,
         cloudBackupFolderUri: String,
         advancedSigning: Bool,
-        cameraPermissionAskedOnce: Bool
+        cameraPermissionAskedOnce: Bool,
+        secureItems: [String: String]
     ) -> StrongboxPayload {
-        // Compute the inner `checksum` deterministically over a
-        // canonicalised JSON of every preceding field. We use
-        // an intermediate encoding rather than reading `self`
-        // because the checksum has to be the SAME for two
-        // semantically-identical snapshots regardless of how
-        // they were built.
-        let preChecksum = ChecksumDraft(
-            v: 2,
+        return StrongboxPayload(
+            v: 3,
             wallets: wallets.sorted { $0.idx < $1.idx },
             currentWalletIndex: currentWalletIndex,
             customNetworks: customNetworks,
             activeNetworkIndex: activeNetworkIndex,
-            backupEnabled: backupEnabled,
-            cloudBackupFolderUri: cloudBackupFolderUri,
-            advancedSigning: advancedSigning,
-            cameraPermissionAskedOnce: cameraPermissionAskedOnce)
-        let checksum = computeChecksum(of: preChecksum)
-        return StrongboxPayload(
-            v: 2,
-            wallets: preChecksum.wallets,
-            currentWalletIndex: currentWalletIndex,
-            customNetworks: customNetworks,
-            activeNetworkIndex: activeNetworkIndex,
-            backupEnabled: backupEnabled,
             cloudBackupFolderUri: cloudBackupFolderUri,
             advancedSigning: advancedSigning,
             cameraPermissionAskedOnce: cameraPermissionAskedOnce,
-            checksum: checksum)
+            secureItems: secureItems,
+            checksum: "")
     }
+
+    // MARK: - Inner-payload checksum (v=3 keyed HMAC)
+    // The on-disk plaintext payload carries a `checksum` field
+    // computed as:
+    //   key = HKDF(mainKey, salt=nil,
+    //              info="strongbox-payload-checksum-v3", L=32)
+    //   tag = HMAC-SHA-256(key, canonical(payload-sans-checksum))
+    //   checksum = base64(tag)
+    // The HKDF info label is distinct from the file-level MAC's
+    // `"integrity-v2"` label so the two derived keys cannot
+    // collide (RFC 5869 §3.2). The keyed scheme catches partial-
+    // decrypt corruption AND prevents an attacker who can flip
+    // ciphertext bits but not forge an HMAC under `mainKey` from
+    // generating a payload that round-trips. Mirrors Android
+    // `StrongboxPayload.computeChecksum(byte[] mainKey)`.
+    // The canonical input is the sorted-keys JSON of the
+    // payload's typed fields with the literal `"checksum"` key
+    // omitted. The encoder is `JSONEncoder` with
+    // `outputFormatting = [.sortedKeys]` which produces the same
+    // byte sequence as Android's `TreeMap` traversal in
+    // `StrongboxFileCodec.canonicalize`.
+
+    /// HKDF info label for the v=3 inner-payload checksum key.
+    /// Bumped from "strongbox-payload-checksum-v2" to surface
+    /// the schema version in the derivation context, so a v=2
+    /// reader cannot accidentally accept a v=3 checksum (the
+    /// derived keys differ).
+    public static let checksumInfoLabel: String = "strongbox-payload-checksum-v3"
 
     /// Internal struct that mirrors `StrongboxPayload` minus the
     /// `checksum` field. Used as the canonicalisation input for
     /// the checksum so the checksum cannot be self-referential.
-    private struct ChecksumDraft: Codable {
+    /// The wallet entries are encoded into the same
+    /// `[String: String]` map shape as the on-disk payload (via
+    /// `WalletEntryCodec`) so the checksum input is byte-
+    /// equivalent to the post-encrypt JSON layout.
+    private struct ChecksumDraft: Encodable {
         let v: Int
         let wallets: [StrongboxPayload.Wallet]
         let currentWalletIndex: Int
         let customNetworks: [BlockchainNetwork]
         let activeNetworkIndex: Int
-        let backupEnabled: Bool
+        // `backupEnabled` is intentionally absent from the checksum
+        // draft to match the StrongboxPayload schema. The checksum
+        // input must be byte-identical to Android's
+        // `canonicalBytesForChecksum` output. See
+        // `StrongboxPayload.swift` for the rationale.
         let cloudBackupFolderUri: String
         let advancedSigning: Bool
         let cameraPermissionAskedOnce: Bool
-    }
+        let secureItems: [String: String]
 
-    private static func computeChecksum(of draft: ChecksumDraft) -> String {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        guard let data = try? encoder.encode(draft) else {
-            // Defensive: a Codable encode of plain value types
-            // cannot fail in practice. Returning an empty
-            // checksum here would still allow the snapshot to
-            // round-trip (the post-decrypt verifier will simply
-            // recompute and accept it), but we log the
-            // anomaly so a regression is observable.
-            Logger.debug(category: "STRONGBOX_CHECKSUM_ENCODE_FAIL",
-                "JSONEncoder().encode(ChecksumDraft) returned nil")
-            return ""
+        private enum CodingKeys: String, CodingKey {
+            case v
+            case wallets
+            case currentWalletIndex
+            case customNetworks
+            case activeNetworkIndex
+            case cloudBackupFolderUri
+            case advancedSigning
+            case cameraPermissionAskedOnce
+            case secureItems
         }
-        // SHA-256 over the canonical JSON of every non-checksum
-        // field. We encode `ChecksumDraft` (which mirrors
-        // `StrongboxPayload` minus `checksum`) with sorted keys to
-        // get a byte-deterministic input. The hash is base64-
-        // encoded for compact JSON storage.
-        let digest = SHA256.hash(data: data)
-        return Data(digest).base64EncodedString()
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(v, forKey: .v)
+            var walletMap: [String: String] = [:]
+            walletMap.reserveCapacity(wallets.count)
+            for w in wallets {
+                let entry = WalletEntryCodec.WalletEntry(
+                    address: w.address,
+                    privateKey: w.privateKey,
+                    publicKey: w.publicKey,
+                    hasSeed: w.hasSeed,
+                    seedWords: w.seedWords)
+                walletMap[String(w.idx)] = try WalletEntryCodec.encode(entry)
+            }
+            try c.encode(walletMap, forKey: .wallets)
+            try c.encode(currentWalletIndex, forKey: .currentWalletIndex)
+            try c.encode(customNetworks, forKey: .customNetworks)
+            try c.encode(activeNetworkIndex, forKey: .activeNetworkIndex)
+            try c.encode(cloudBackupFolderUri, forKey: .cloudBackupFolderUri)
+            try c.encode(advancedSigning, forKey: .advancedSigning)
+            try c.encode(cameraPermissionAskedOnce, forKey: .cameraPermissionAskedOnce)
+            try c.encode(secureItems, forKey: .secureItems)
+        }
     }
 
-
-
-    /// Verify a snapshot's `checksum` field matches a freshly-
-    /// computed one. Layer 4 calls this after a successful
-    /// `Aead.open` and `StrongboxPadding.unpad` to surface
-    /// partial-decrypt or post-decrypt corruption as an
-    /// explicit tamper-detected error rather than silently
-    /// rebuilding a corrupted UI state.
-    /// (notes for reviewers):
-    /// the comparison is constant-time over the underlying
-    /// bytes, NOT a Swift `String.==`. This is defense-in-depth
-    /// only - the checksum is base64 (printable ASCII), and
-    /// there is no remote oracle that can measure decryption
-    /// time at byte granularity in our process model. But the
-    /// project discipline is "all integrity comparisons are
-    /// constant-time", and writing the constant-time compare
-    /// is free.
-    public static func verifyChecksum(of payload: StrongboxPayload) -> Bool {
+    /// Compute the keyed-HMAC checksum bytes (32 bytes) for
+    /// `payload`, using `mainKey` to derive a fresh checksum
+    /// key. The derived key is zeroized before this method
+    /// returns. Callers should base64-encode the result for
+    /// JSON storage.
+    public static func computeChecksum(of payload: StrongboxPayload, mainKey: Data) -> Data {
         let draft = ChecksumDraft(
             v: payload.v,
             wallets: payload.wallets,
             currentWalletIndex: payload.currentWalletIndex,
             customNetworks: payload.customNetworks,
             activeNetworkIndex: payload.activeNetworkIndex,
-            backupEnabled: payload.backupEnabled,
             cloudBackupFolderUri: payload.cloudBackupFolderUri,
             advancedSigning: payload.advancedSigning,
-            cameraPermissionAskedOnce: payload.cameraPermissionAskedOnce)
-        let computed = computeChecksum(of: draft)
-        return constantTimeEquals(computed, payload.checksum)
+            cameraPermissionAskedOnce: payload.cameraPermissionAskedOnce,
+            secureItems: payload.secureItems)
+        let canonical = canonicalBytesForChecksum(draft)
+        var derivedKey = Mac.hkdfExtractAndExpand(
+            inputKeyMaterial: mainKey,
+            salt: Data(),
+            info: checksumInfoLabel,
+            length: 32)
+        defer { derivedKey.resetBytes(in: 0..<derivedKey.count) }
+        return Mac.hmacSha256(message: canonical, keyBytes: derivedKey)
     }
 
-    /// Constant-time byte-wise equality on two strings. Returns
-    /// `false` for length mismatch. The loop accumulates the
-    /// XOR of every byte pair into a single accumulator so the
-    /// runtime is independent of where the first mismatching
-    /// byte appears. Used for integrity comparisons (see
-    /// `verifyChecksum`); NOT general-purpose string equality.
-    private static func constantTimeEquals(_ a: String, _ b: String) -> Bool {
-        let aBytes = Array(a.utf8)
-        let bBytes = Array(b.utf8)
-        if aBytes.count != bBytes.count { return false }
-        var accumulator: UInt8 = 0
-        for i in 0..<aBytes.count {
-            accumulator |= aBytes[i] ^ bBytes[i]
-        }
-        return accumulator == 0
+    /// Canonical sorted-keys JSON encoding of the payload-sans-
+    /// checksum. Exposed for cross-platform parity tests that
+    /// need to inspect the exact bytes that feed the inner
+    /// checksum HMAC. NOT for general use.
+    public static func canonicalBytesForChecksum(of payload: StrongboxPayload) -> Data {
+        let draft = ChecksumDraft(
+            v: payload.v,
+            wallets: payload.wallets,
+            currentWalletIndex: payload.currentWalletIndex,
+            customNetworks: payload.customNetworks,
+            activeNetworkIndex: payload.activeNetworkIndex,
+            cloudBackupFolderUri: payload.cloudBackupFolderUri,
+            advancedSigning: payload.advancedSigning,
+            cameraPermissionAskedOnce: payload.cameraPermissionAskedOnce,
+            secureItems: payload.secureItems)
+        return canonicalBytesForChecksum(draft)
     }
+
+    private static func canonicalBytesForChecksum(_ draft: ChecksumDraft) -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(draft) else {
+            Logger.debug(category: "STRONGBOX_CHECKSUM_ENCODE_FAIL",
+                "JSONEncoder().encode(ChecksumDraft) returned nil")
+            return Data()
+        }
+        return data
+    }
+
+    /// Stamp the keyed `checksum` field on `payload` using
+    /// `mainKey`. Returns a new payload value with the same
+    /// fields and a non-empty `checksum`. Layer 4 calls this
+    /// inside the persist pipeline (right before encoding for
+    /// AEAD seal) and inside the deep-verify path.
+    public static func stampChecksum(of payload: StrongboxPayload, mainKey: Data) -> StrongboxPayload {
+        let tag = computeChecksum(of: payload, mainKey: mainKey)
+        return StrongboxPayload(
+            v: payload.v,
+            wallets: payload.wallets,
+            currentWalletIndex: payload.currentWalletIndex,
+            customNetworks: payload.customNetworks,
+            activeNetworkIndex: payload.activeNetworkIndex,
+            cloudBackupFolderUri: payload.cloudBackupFolderUri,
+            advancedSigning: payload.advancedSigning,
+            cameraPermissionAskedOnce: payload.cameraPermissionAskedOnce,
+            secureItems: payload.secureItems,
+            checksum: tag.base64EncodedString())
+    }
+
+    /// Verify a snapshot's `checksum` field matches a freshly-
+    /// computed one keyed by `mainKey`. Constant-time bytewise
+    /// comparison via `Mac.verify` (HMAC.isValidAuthenticationCode).
+    /// Layer 4 calls this after a successful `Aead.open` and
+    /// `StrongboxPadding.unpad`.
+    public static func verifyChecksum(of payload: StrongboxPayload, mainKey: Data) -> Bool {
+        guard !payload.checksum.isEmpty,
+              let stored = Data(base64Encoded: payload.checksum),
+              stored.count == 32 else {
+            return false
+        }
+        let canonical = canonicalBytesForChecksum(of: payload)
+        var derivedKey = Mac.hkdfExtractAndExpand(
+            inputKeyMaterial: mainKey,
+            salt: Data(),
+            info: checksumInfoLabel,
+            length: 32)
+        defer { derivedKey.resetBytes(in: 0..<derivedKey.count) }
+        return Mac.verify(canonical, mac: stored, keyBytes: derivedKey)
+    }
+
 }

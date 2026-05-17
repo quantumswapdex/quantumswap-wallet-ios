@@ -238,6 +238,15 @@ UITableViewDelegate {
 
         table.dataSource = self
         table.delegate = self
+        // Pull-to-refresh on the post-unlock home wallet. Drags down
+        // on the token table re-fetches page 1 without clearing the
+        // visible rows and posts `walletHomeRefreshRequested` so the
+        // HomeViewController can also reissue its balance fetch. The
+        // standard UIRefreshControl spinner is sufficient feedback
+        // here - Android does the same `SwipeRefreshLayout` pattern.
+        let rc = UIRefreshControl()
+        rc.addTarget(self, action: #selector(handlePullToRefresh), for: .valueChanged)
+        table.refreshControl = rc
         table.translatesAutoresizingMaskIntoConstraints = false
         // Span separators full-width so the row delimiter lines up
         // with every column boundary; the default 16pt inset would
@@ -447,6 +456,83 @@ UITableViewDelegate {
         }
         unrecognizedItems = items.filter {
             !RecognizedTokens.isRecognized($0.contractAddress)
+        }
+    }
+
+    /// Pull-to-refresh handler attached to `table.refreshControl`.
+    /// Re-fetches page 1 of the token list WITHOUT clearing the
+    /// currently-visible rows: the new page replaces `items`
+    /// atomically on success, but on failure the user keeps seeing
+    /// the previous list (matches the Android refresh-error UX).
+    /// Also posts `walletHomeRefreshRequested` so the
+    /// `HomeViewController` re-issues the native balance fetch -
+    /// kept decoupled via NotificationCenter so this controller does
+    /// not have to walk the parent chain.
+    @objc private func handlePullToRefresh() {
+        NotificationCenter.default.post(
+            name: .walletHomeRefreshRequested, object: nil)
+        loadFirstPage(replacing: true, manual: true)
+    }
+
+    /// Page-1 fetch variant used by pull-to-refresh. Increments
+    /// `fetchGeneration` so any in-flight pagination request is
+    /// dropped on return, swaps the visible items atomically on
+    /// success, and on failure leaves the previously-displayed list
+    /// alone. `manual == true` opts in to a dismissible error
+    /// dialog; auto-driven callers leave it false and stay silent.
+    private func loadFirstPage(replacing: Bool, manual: Bool) {
+        let address = currentAddress
+        guard !address.isEmpty else {
+            table.refreshControl?.endRefreshing()
+            return
+        }
+        fetchGeneration &+= 1
+        let generationAtFetch = fetchGeneration
+        // Cancel the in-flight `loading` guard so the auto-paginator
+        // does not block the manual refresh; the generation check
+        // below still discards the older request's response.
+        loading = true
+        Task {
+            let result: AccountTokenListResponse?
+            let caughtError: Error?
+            do {
+                result = try await AccountsApi.accountTokens(
+                    address: address, pageIndex: 1)
+                caughtError = nil
+            } catch {
+                result = nil
+                caughtError = error
+            }
+            await MainActor.run {
+                self.table.refreshControl?.endRefreshing()
+                guard generationAtFetch == self.fetchGeneration else { return }
+                self.loading = false
+                guard let resp = result else {
+                    // Preserve the existing rows on a transient
+                    // failure. Only manual taps surface an error
+                    // dialog; an auto-refetch (e.g. tab-driven)
+                    // stays silent.
+                    if manual, let err = caughtError {
+                        let dlg = MessageInformationDialogViewController.error(
+                            title: Localization.shared.getErrorTitleByLangValues(),
+                            message: "\(err)")
+                        self.present(dlg, animated: true)
+                    }
+                    return
+                }
+                let raw = resp.result ?? []
+                let filtered = StablecoinImpersonatorFilter.filter(raw)
+                if replacing {
+                    self.items = filtered
+                    self.nextPage = 2
+                } else {
+                    self.items.append(contentsOf: filtered)
+                    self.nextPage += 1
+                }
+                self.applyFilteredItems()
+                self.reloadDisplayedItems()
+                self.applyEmptyState()
+            }
         }
     }
 
