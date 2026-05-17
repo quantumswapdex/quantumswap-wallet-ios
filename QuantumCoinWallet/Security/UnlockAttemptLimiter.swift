@@ -1,7 +1,7 @@
 // UnlockAttemptLimiter.swift (Security layer)
 // Rate-limiting for any password-based unlock
 // attempt against the strongbox or against a backup-restore decrypt.
-// Why this exists (notes for reviewers):
+// Why this exists:
 // `UnlockCoordinatorV2.unlockWithPassword` runs scrypt with
 // `N = 2^18, r = 8, p = 1` on the user's password. That is
 // roughly 200-400 ms per attempt on
@@ -38,7 +38,6 @@
 // their wallet. The backoff still shrinks an unlimited
 // brute-force from "minutes" to "decades" for any
 // low-entropy-but-not-trivial password.
-// (notes for reviewers):
 // the original schedule capped at 1 hour (3600s) for the 10+
 // tier. That cap was reduced to 5 minutes (300s) to bound the
 // worst-case lockout a legitimate user with severe typo storms
@@ -138,7 +137,6 @@ public enum UnlockAttemptLimiter {
 
     /// Read the current state and return the decision. Idempotent;
     /// safe to call from any thread.
-    /// (notes for reviewers):
     /// the elapsed-time computation uses `mach_continuous_time()`,
     /// which is immune to wall-clock writes from Settings (see
     /// the file header). Reboot is detected by the
@@ -276,7 +274,6 @@ public enum UnlockAttemptLimiter {
     // MARK: - State
 
     /// Persisted limiter state.
-    /// (notes for reviewers):
     /// `lastFailureMonotonicNanos` is a `mach_continuous_time()`
     /// reading converted to nanoseconds, NOT a wall-clock
     /// `CFAbsoluteTime`. The field is intentionally named with

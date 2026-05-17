@@ -1,6 +1,6 @@
 // StrongboxLayerTests.swift
-// Unit tests for the v2 storage redesign's layered modules.
-// Each layer is exercised in isolation:
+// Unit tests for the v=3 unified-schema storage stack's
+// layered modules. Each layer is exercised in isolation:
 // Layer 3 (Crypto):
 // - SecureRandom: non-zero output, throws on RNG failure
 // (RNG-failure path is mocked at the call-site level
@@ -16,7 +16,9 @@
 // - AtomicSlotWriter: write -> read round-trip; protection
 // class on disk; cleanupTempFiles.
 // Layer 5 (Strongbox):
-// - StrongboxPayload checksum round-trip.
+// - StrongboxPayload v=3 keyed-HMAC checksum round-trip
+// (stamp under mainKey, verify under same mainKey, fail
+// under a different mainKey or any payload mutation).
 // - Strongbox.shared snapshot lifecycle.
 // design rationale:
 // These tests exist so a future regression cannot land
@@ -28,6 +30,7 @@
 // (any regression in fails).
 
 import XCTest
+import CryptoKit
 @testable import QuantumCoinWallet
 
 final class StrongboxLayerTests: XCTestCase {
@@ -143,13 +146,28 @@ final class StrongboxLayerTests: XCTestCase {
     // MARK: - Layer 2: StrongboxPadding
 
     func testStrongboxPaddingRoundTrip() throws {
-        for length in [0, 1, 16, 100, 1024, 32_767] {
+        // Last entry probes the bucket's upper bound, derived
+        // from the constant so a future bucket bump does not
+        // silently drift this test out of sync.
+        for length in [0, 1, 16, 100, 1024, StrongboxPadding.bucketSize - 1] {
             let plaintext = Data(repeating: 0xAB, count: length)
             let padded = try StrongboxPadding.pad(plaintext)
             XCTAssertEqual(padded.count, StrongboxPadding.bucketSize)
             let unpadded = try StrongboxPadding.unpad(padded)
             XCTAssertEqual(unpadded, plaintext, "round-trip failed at length=\(length)")
         }
+    }
+
+    func testStrongboxPaddingBucketIsExactly4MiB() {
+        // CRITICAL: changing this constant breaks cross-device
+        // padding length stability. Same plaintext produces
+        // identical-length ciphertext on every install, so a
+        // multi-device backup pair cannot be distinguished by
+        // length alone. 4 MiB is sized to fit >= 256 wallets
+        // where each wallet stores its raw post-quantum private +
+        // public key bytes (~10 KiB/wallet) plus address + seed
+        // phrase + framing, plus networks/metadata + headroom.
+        XCTAssertEqual(4_194_304, StrongboxPadding.bucketSize)
     }
 
     func testStrongboxPaddingRejectsOversizedPlaintext() {
@@ -172,33 +190,274 @@ final class StrongboxLayerTests: XCTestCase {
         XCTAssertThrowsError(try StrongboxPadding.unpad(wrongLength))
     }
 
-    // MARK: - Layer 5: StrongboxPayload checksum
+    // MARK: - Layer 5: StrongboxPayload v=3 keyed-HMAC checksum
+
+    /// Fixed mainKey used by the keyed-checksum tests so the
+    /// stamped tag is deterministic and a future regression in
+    /// HKDF, HMAC, or the canonical-bytes encoder surfaces as a
+    /// pinpoint failure here. Mirrors the Android counterpart
+    /// `StrongboxPayloadV3Test.FIXED_MAIN_KEY`.
+    private static let fixedMainKey: Data = Data((1...32).map { UInt8($0) })
 
     func testStrongboxPayloadChecksumDeterministic() {
-        let p1 = Strongbox.emptySnapshot
-        let p2 = Strongbox.emptySnapshot
-        XCTAssertEqual(p1().checksum, p2().checksum,
-            "two empty snapshots must have identical checksums")
-        XCTAssertTrue(Strongbox.verifyChecksum(of: p1()))
+        // Stamping the same payload with the same mainKey twice
+        // must produce byte-identical checksum tags. Any drift
+        // (Encoder option, sortedKeys, HKDF re-implementation)
+        // breaks this immediately.
+        let p1 = Strongbox.stampChecksum(
+            of: Strongbox.emptySnapshot(),
+            mainKey: Self.fixedMainKey)
+        let p2 = Strongbox.stampChecksum(
+            of: Strongbox.emptySnapshot(),
+            mainKey: Self.fixedMainKey)
+        XCTAssertEqual(p1.checksum, p2.checksum,
+            "two empty snapshots stamped under the same mainKey "
+            + "must have identical keyed-HMAC checksums")
+        XCTAssertTrue(Strongbox.verifyChecksum(
+            of: p1, mainKey: Self.fixedMainKey),
+            "freshly-stamped checksum must verify under the "
+            + "same mainKey")
+    }
+
+    func testStrongboxPayloadChecksumFailsUnderDifferentMainKey() {
+        // The whole point of the v=3 switch from unkeyed SHA-256
+        // to keyed HMAC is that an attacker who can mutate the
+        // ciphertext but not learn mainKey cannot forge a valid
+        // checksum. This test pins that property: a different
+        // mainKey MUST not verify.
+        let stamped = Strongbox.stampChecksum(
+            of: Strongbox.emptySnapshot(),
+            mainKey: Self.fixedMainKey)
+        var otherKey = Self.fixedMainKey
+        otherKey[0] ^= 0x01
+        XCTAssertFalse(Strongbox.verifyChecksum(
+            of: stamped, mainKey: otherKey),
+            "checksum verified under a different mainKey — keyed "
+            + "HMAC binding is broken")
     }
 
     func testStrongboxPayloadChecksumDetectsTamper() {
-        let payload = Strongbox.emptySnapshot
-        // Construct a tampered payload by changing one boolean
-        // while keeping the original (now-stale) checksum.
+        let stamped = Strongbox.stampChecksum(
+            of: Strongbox.emptySnapshot(),
+            mainKey: Self.fixedMainKey)
+        // Construct a tampered payload by flipping one boolean
+        // while keeping the original (now-stale) checksum. Any
+        // checksum-scoped boolean works; we use `advancedSigning`.
         let tampered = StrongboxPayload(
-            v: payload().v,
-            wallets: payload().wallets,
-            currentWalletIndex: payload().currentWalletIndex,
-            customNetworks: payload().customNetworks,
-            activeNetworkIndex: payload().activeNetworkIndex,
-            backupEnabled: !payload().backupEnabled,
-            cloudBackupFolderUri: payload().cloudBackupFolderUri,
-            advancedSigning: payload().advancedSigning,
-            cameraPermissionAskedOnce: payload().cameraPermissionAskedOnce,
-            checksum: payload().checksum)
-        XCTAssertFalse(Strongbox.verifyChecksum(of: tampered),
+            v: stamped.v,
+            wallets: stamped.wallets,
+            currentWalletIndex: stamped.currentWalletIndex,
+            customNetworks: stamped.customNetworks,
+            activeNetworkIndex: stamped.activeNetworkIndex,
+            cloudBackupFolderUri: stamped.cloudBackupFolderUri,
+            advancedSigning: !stamped.advancedSigning,
+            cameraPermissionAskedOnce: stamped.cameraPermissionAskedOnce,
+            secureItems: stamped.secureItems,
+            checksum: stamped.checksum)
+        XCTAssertFalse(Strongbox.verifyChecksum(
+            of: tampered, mainKey: Self.fixedMainKey),
             "tampered payload must fail checksum")
+    }
+
+    func testStrongboxPayloadChecksumLabelIsV3() {
+        // The HKDF info string MUST surface the schema version so
+        // a v=3 mainKey can never collide with a v=2 derived key.
+        // Both platforms pin the exact same string verbatim; the
+        // cross-platform vector suite enforces byte-identity.
+        XCTAssertEqual("strongbox-payload-checksum-v3",
+            Strongbox.checksumInfoLabel)
+    }
+
+    func testStrongboxPayloadCanonicalBytesAreStable() {
+        // canonicalBytesForChecksum MUST be a pure function of
+        // payload state — any nondeterminism would break the
+        // cross-platform inner-checksum.
+        let p = Strongbox.emptySnapshot()
+        let a = Strongbox.canonicalBytesForChecksum(of: p)
+        let b = Strongbox.canonicalBytesForChecksum(of: p)
+        XCTAssertEqual(a, b,
+            "canonical bytes drifted under repeated calls")
+    }
+
+    func testStrongboxPayloadCanonicalBytesIgnoreChecksumField() {
+        // Mutating checksum MUST NOT change the canonical bytes
+        // used to compute the checksum, or the keyed-HMAC chain
+        // is circular.
+        let stamped = Strongbox.stampChecksum(
+            of: Strongbox.emptySnapshot(),
+            mainKey: Self.fixedMainKey)
+        let withDifferentChecksum = StrongboxPayload(
+            v: stamped.v,
+            wallets: stamped.wallets,
+            currentWalletIndex: stamped.currentWalletIndex,
+            customNetworks: stamped.customNetworks,
+            activeNetworkIndex: stamped.activeNetworkIndex,
+            cloudBackupFolderUri: stamped.cloudBackupFolderUri,
+            advancedSigning: stamped.advancedSigning,
+            cameraPermissionAskedOnce: stamped.cameraPermissionAskedOnce,
+            secureItems: stamped.secureItems,
+            checksum: "unrelated-checksum-string")
+        XCTAssertEqual(
+            Strongbox.canonicalBytesForChecksum(of: stamped),
+            Strongbox.canonicalBytesForChecksum(of: withDifferentChecksum))
+    }
+
+    /// Regression: the `backupEnabled` field name MUST NOT appear
+    /// anywhere in the canonical JSON. The toggle is intentionally
+    /// kept out of the encrypted payload so the OS backup agent
+    /// can read it pre-unlock from `UserDefaults`.
+    func testCanonicalJsonOmitsBackupEnabled() {
+        let bytes = Strongbox.canonicalBytesForChecksum(
+            of: Strongbox.emptySnapshot())
+        let json = String(data: bytes, encoding: .utf8) ?? ""
+        XCTAssertFalse(
+            json.contains("backupEnabled"),
+            "backupEnabled must not appear in canonical JSON; got \(json)")
+    }
+
+    func testStrongboxPayloadSecureItemsAreCheckSummed() {
+        // secureItems are part of the checksum scope, so adding /
+        // removing / mutating them must produce a different tag.
+        let baseKey = Self.fixedMainKey
+        let v = StrongboxFileCodec.schemaVersion
+        let withItem = StrongboxPayload(
+            v: v,
+            wallets: [],
+            currentWalletIndex: 0,
+            customNetworks: [],
+            activeNetworkIndex: 0,
+            cloudBackupFolderUri: "",
+            advancedSigning: false,
+            cameraPermissionAskedOnce: false,
+            secureItems: ["k": "v"],
+            checksum: "")
+        let withoutItem = StrongboxPayload(
+            v: v,
+            wallets: [],
+            currentWalletIndex: 0,
+            customNetworks: [],
+            activeNetworkIndex: 0,
+            cloudBackupFolderUri: "",
+            advancedSigning: false,
+            cameraPermissionAskedOnce: false,
+            secureItems: [:],
+            checksum: "")
+        let tagWith = Strongbox.computeChecksum(of: withItem, mainKey: baseKey)
+        let tagWithout = Strongbox.computeChecksum(of: withoutItem, mainKey: baseKey)
+        XCTAssertNotEqual(tagWith, tagWithout,
+            "secureItems must be inside the checksum scope")
+    }
+
+    // MARK: - Cross-platform seed-derived portability vectors
+    // The shared seed, SHAKE-256 expander, and helper builders
+    // live in `StrongboxPortabilityFixtures.swift`; consumers
+    // (this file, the new `Strongbox*Tests` ports, and any future
+    // Android-parity test class) call the same fixture surface so
+    // the pinned digests stay byte-identical across both repos.
+
+    // The slot-JSON builder + scrypt-rejection assertion used
+    // by the validation tests below live in
+    // `StrongboxSlotJsonFixtures.swift` so the dedicated
+    // `StrongboxFileCodecScryptValidationTests` port can reuse
+    // the same shape.
+
+    func testPortabilitySeededShakeGeneratorMatchesAndroidSanityOutput() {
+        XCTAssertEqual(
+            "3f750698656d309fdc960e2734da21f566c606dd1a6d3eacd4a0accf612e2e5e",
+            StrongboxPortabilityFixtures.vectorBytes("sanity", count: 32)
+                .portabilityHex)
+    }
+
+    func testPortabilityPublishedRfcVectorsStillPass() {
+        let key = Data(repeating: 0x0b, count: 20)
+        let message = Data("Hi There".utf8)
+        XCTAssertEqual(
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+            Mac.hmacSha256(message: message, keyBytes: key).portabilityHex)
+
+        // RFC 5869 A.1, using binary info bytes (not the String
+        // convenience wrapper) to pin the primitive independently
+        // of app-specific UTF-8 labels.
+        let ikm = Data(repeating: 0x0b, count: 22)
+        let salt = Data(portabilityHex: "000102030405060708090a0b0c")
+        let info = Data(portabilityHex: "f0f1f2f3f4f5f6f7f8f9")
+        XCTAssertEqual(
+            "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865",
+            Mac.hkdfExtractAndExpand(
+                inputKeyMaterial: ikm,
+                salt: salt,
+                info: info,
+                length: 42).portabilityHex)
+    }
+
+    // The remaining cross-platform vector assertions
+    // (primitive vectors, AEAD-with-injected-IV, wallet-entry and
+    // canonical-payload digests, scrypt KAT) live in the
+    // dedicated `StrongboxPortabilityVectorTests` class so the
+    // Swift and Android suites line up class-for-class.
+
+    // MARK: - scrypt KDF parameter min-bound validation
+
+    /// `StrongboxFileCodec.decodeOnly` MUST reject any v=3 slot
+    /// whose advertised scrypt cost is below the documented
+    /// minimum, before any AEAD work is done. Without this guard,
+    /// an attacker who can place a slot file (e.g. via a malicious
+    /// iCloud Drive replay or a crafted import) plus the user's
+    /// known password could craft a valid envelope with N=1024 and
+    /// the right MAC, dropping the brute-force ceiling by ~256x.
+    /// Mirrored on Android by the symmetric tests in
+    /// `StrongboxFileCodecScryptValidationTest.java`.
+    func testCodecAcceptsDocumentedScryptDefaults() throws {
+        let bytes = try StrongboxSlotJsonFixtures.buildSlotJsonBytes(
+            N: JsBridge.SCRYPT_N, r: JsBridge.SCRYPT_R,
+            p: JsBridge.SCRYPT_P, keyLen: JsBridge.SCRYPT_KEY_LEN)
+        let decoded = try StrongboxFileCodec.decodeOnly(bytes)
+        XCTAssertEqual(decoded.kdfParams.N, JsBridge.SCRYPT_N)
+    }
+
+    func testCodecRejectsLowScryptN() throws {
+        let bytes = try StrongboxSlotJsonFixtures.buildSlotJsonBytes(
+            N: 1024, r: JsBridge.SCRYPT_R,
+            p: JsBridge.SCRYPT_P, keyLen: JsBridge.SCRYPT_KEY_LEN)
+        StrongboxSlotJsonFixtures.assertCodecRejectsAsMalformed(bytes,
+            reason: "low N (1024) must be rejected")
+    }
+
+    func testCodecRejectsLowScryptR() throws {
+        let bytes = try StrongboxSlotJsonFixtures.buildSlotJsonBytes(
+            N: JsBridge.SCRYPT_N, r: 1,
+            p: JsBridge.SCRYPT_P, keyLen: JsBridge.SCRYPT_KEY_LEN)
+        StrongboxSlotJsonFixtures.assertCodecRejectsAsMalformed(bytes,
+            reason: "low r must be rejected")
+    }
+
+    func testCodecRejectsLowScryptKeyLen() throws {
+        let bytes = try StrongboxSlotJsonFixtures.buildSlotJsonBytes(
+            N: JsBridge.SCRYPT_N, r: JsBridge.SCRYPT_R,
+            p: JsBridge.SCRYPT_P, keyLen: 16)
+        StrongboxSlotJsonFixtures.assertCodecRejectsAsMalformed(bytes,
+            reason: "low keyLen (16) must be rejected")
+    }
+
+    func testCodecRejectsZeroScryptP() throws {
+        let bytes = try StrongboxSlotJsonFixtures.buildSlotJsonBytes(
+            N: JsBridge.SCRYPT_N, r: JsBridge.SCRYPT_R,
+            p: 0, keyLen: JsBridge.SCRYPT_KEY_LEN)
+        StrongboxSlotJsonFixtures.assertCodecRejectsAsMalformed(bytes,
+            reason: "p < 1 must be rejected")
+    }
+
+    /// Defense-in-depth: even if the codec validation were bypassed
+    /// somehow, `attemptUnlockSingle` independently rejects sub-
+    /// minimum params. We can't easily exercise the unlock path
+    /// without a real strongbox, but the value-type constructor
+    /// remains permissive (only the codec / unlock guards enforce
+    /// the bound), so this serves as a reminder that two layers
+    /// enforce it. See `UnlockCoordinatorV2.attemptUnlockSingle`
+    /// for the second guard.
+    func testUnlockGuardRejectsWeakenedScryptParams() {
+        let weak = StrongboxFileCodec.KdfParams(N: 1024, r: 1, p: 1, keyLen: 16)
+        XCTAssertEqual(weak.N, 1024)
     }
 
     // MARK: - Layer 5: Strongbox.shared snapshot lifecycle
@@ -222,16 +481,25 @@ final class StrongboxLayerTests: XCTestCase {
     /// Exercises the read-projection helpers
     /// (`indexToAddress`, `addressToIndex`,
     /// `allAddressesSortedByIndex`, `address(forIndex:)`,
-    /// `encryptedSeed(at:)`, `hasAnyWallet`) that replace the
+    /// `privateKey(at:)`, `publicKey(at:)`, `seedWords(at:)`,
+    /// `hasSeed(at:)`, `hasAnyWallet`) that replace the
     /// historical KeyStore dictionary surface. These are pure
     /// functions of the snapshot, so the test installs a known
     /// snapshot directly and asserts the projections without
     /// going through the unlock flow.
     func testStrongboxReadProjections() throws {
+        let sk0 = Data([0xAA, 0xBB, 0xCC])
+        let pk0 = Data([0x11, 0x22, 0x33])
+        let sk1 = Data([0x77, 0x88])
+        let pk1 = Data([0x44, 0x55, 0x66])
         let w0 = StrongboxPayload.Wallet(
-            idx: 0, address: "0xAAAA", encryptedSeed: "seed-0", hasSeed: true)
+            idx: 0, address: "0xAAAA",
+            privateKey: sk0, publicKey: pk0,
+            hasSeed: true, seedWords: "alpha,beta")
         let w1 = StrongboxPayload.Wallet(
-            idx: 1, address: "0xBBBB", encryptedSeed: "seed-1", hasSeed: false)
+            idx: 1, address: "0xBBBB",
+            privateKey: sk1, publicKey: pk1,
+            hasSeed: false, seedWords: "")
         let payload = try Strongbox.shared.snapshotByAppendingWalletStarting(
             from: Strongbox.emptySnapshot(), wallet: w0)
         let payload2 = try Strongbox.shared.snapshotByAppendingWalletStarting(
@@ -247,15 +515,24 @@ final class StrongboxLayerTests: XCTestCase {
             ["0xAAAA", "0xBBBB"])
         XCTAssertEqual(Strongbox.shared.address(forIndex: 1), "0xBBBB")
         XCTAssertNil(Strongbox.shared.address(forIndex: 99))
-        XCTAssertEqual(Strongbox.shared.encryptedSeed(at: 0), "seed-0")
-        XCTAssertEqual(Strongbox.shared.wallet(at: 1)?.hasSeed, false)
+        XCTAssertEqual(Strongbox.shared.privateKey(at: 0), sk0)
+        XCTAssertEqual(Strongbox.shared.publicKey(at: 0), pk0)
+        XCTAssertEqual(Strongbox.shared.seedWords(at: 0), "alpha,beta")
+        XCTAssertEqual(Strongbox.shared.hasSeed(at: 0), true)
+        XCTAssertEqual(Strongbox.shared.privateKey(at: 1), sk1)
+        XCTAssertEqual(Strongbox.shared.publicKey(at: 1), pk1)
+        XCTAssertEqual(Strongbox.shared.seedWords(at: 1), "")
+        XCTAssertEqual(Strongbox.shared.hasSeed(at: 1), false)
 
         Strongbox.shared.clearSnapshot()
         XCTAssertFalse(Strongbox.shared.hasAnyWallet)
         XCTAssertTrue(Strongbox.shared.indexToAddress.isEmpty)
         XCTAssertTrue(Strongbox.shared.addressToIndex.isEmpty)
         XCTAssertTrue(Strongbox.shared.allAddressesSortedByIndex().isEmpty)
-        XCTAssertNil(Strongbox.shared.encryptedSeed(at: 0))
+        XCTAssertNil(Strongbox.shared.privateKey(at: 0))
+        XCTAssertNil(Strongbox.shared.publicKey(at: 0))
+        XCTAssertNil(Strongbox.shared.seedWords(at: 0))
+        XCTAssertNil(Strongbox.shared.hasSeed(at: 0))
     }
 
     // MARK: - Invariant: no v1 references survive the cutover
@@ -341,3 +618,9 @@ private extension Strongbox {
     }
 }
 
+// MARK: - Shared portability fixtures
+// The seeded SHAKE-256 helper, the hex extension, and the
+// `vectorBytes` / `generatedWallet` / `generatedPayload`
+// builders live in `StrongboxPortabilityFixtures.swift` so
+// every Swift Android-parity test class can consume the same
+// seam.

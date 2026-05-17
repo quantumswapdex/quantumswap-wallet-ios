@@ -83,18 +83,28 @@ enum StablecoinImpersonatorFilter {
     /// fall into three buckets:
     ///
     /// - Generic stablecoin nouns: `usd`, `dai`, `tether`,
-    ///   `stable`, `stablecoin`, `dollar`, `euro`, `yen`.
+    ///   `stable`, `stablecoin`, `dollar`, `euro`, `yen`,
+    ///   `rupee`.
     /// - Specific stablecoin product symbols / brand names:
     ///   `frax`, `fdusd`, `lusd`, `tusd`, `gusd`, `pyusd`, `eurt`,
-    ///   `eurc`, `eurs`, `gbpt`, `cny`.
+    ///   `eurc`, `eurs`, `gbpt`, `cny`, `inr`.
+    /// - Spelled-out fiat-denomination words used as a
+    ///   conservative stand-in for short tickers that would
+    ///   otherwise collide with legitimate tokens: `rupiah`
+    ///   (Indonesian rupiah; the ticker `idr` is intentionally
+    ///   NOT in the list because it would false-positive against
+    ///   real tokens like `Hidro` / `Idris`).
     ///
     /// The list is intentionally small. Adding a pattern is
     /// cheap; removing one risks surfacing impersonator tokens.
+    /// Stays byte-for-byte aligned with the Android counterpart at
+    /// `app/src/main/java/com/quantumcoinwallet/app/tokens/StablecoinImpersonatorFilter.java`.
     static let patterns: [String] = [
         "usd", "dai", "tether", "stable", "stablecoin",
         "frax", "fdusd", "lusd", "tusd", "gusd", "pyusd",
         "eurt", "eurc", "eurs",
-        "dollar", "euro", "yen", "gbpt", "cny"
+        "dollar", "euro", "yen", "gbpt", "cny",
+        "inr", "rupee", "rupiah"
     ]
 
     /// Returns `true` iff the supplied symbol or name contains

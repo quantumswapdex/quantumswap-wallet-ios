@@ -19,7 +19,6 @@ public enum CoinUtils {
     /// Maximum `decimals` value accepted by `parseUnits` /
     /// `formatUnits` before the input is treated as malformed
     /// and short-circuited to the existing `"0"` sentinel.
-    /// (notes for reviewers):
     /// `decimals` reaches these helpers from token-metadata RPC
     /// responses and from user-pasted contract definitions. A
     /// hostile RPC endpoint (or a malformed token contract) can
@@ -38,7 +37,6 @@ public enum CoinUtils {
     /// Maximum hex-input length accepted by `hexToDecimalString`
     /// before the conversion is treated as malformed and
     /// short-circuited to nil (which `formatUnits` maps to "0").
-    /// (notes for reviewers):
     /// the conversion is O(N^2) over the hex input length; the
     /// input ultimately comes from RPC responses (untrusted).
     /// A maliciously long hex string freezes the UI long enough
@@ -48,10 +46,25 @@ public enum CoinUtils {
     /// 256 bits).
     public static let MAX_HEX_INPUT_CHARS: Int = 1024
 
+    /// Placeholder shown for a wei value that has not yet resolved to
+    /// a real balance - either because the polling task has not yet
+    /// completed its first successful fetch, or because the API
+    /// response carried no `balance` field. Distinct from the `"0"`
+    /// sentinel used for genuine zero balances; the dash communicates
+    /// "unknown" rather than "empty".
+    public static let UNKNOWN_BALANCE_PLACEHOLDER: String = "-"
+
     /// Convert a decimal-string wei value to a human-readable ether
-    /// amount. Null / empty / non-numeric input returns "0".
+    /// amount. A nil / empty input returns the `-` placeholder so the
+    /// UI can distinguish "no balance fetched yet" from a real zero
+    /// balance; non-numeric input still falls through to "0" so we
+    /// never crash on malformed RPC responses.
     public static func formatWei(_ weiValue: String?) -> String {
-        return formatUnits(weiValue, decimals: ETHER_DECIMALS)
+        guard let raw = weiValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return UNKNOWN_BALANCE_PLACEHOLDER
+        }
+        return formatUnits(raw, decimals: ETHER_DECIMALS)
     }
 
     /// Convert a wei-like value (decimal or 0x-prefixed hex) to a

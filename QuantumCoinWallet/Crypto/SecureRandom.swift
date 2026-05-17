@@ -6,7 +6,7 @@
 // nonces, KDF salts, recipient addresses for sandbox-escape
 // probes, file names) MUST be observed to throw on RNG failure
 // rather than silently returning zero bytes.
-// Why this exists (notes for reviewers):
+// Why this exists:
 // `SecRandomCopyBytes(_:_:_:)` returns an `OSStatus`. On
 // failure the destination buffer is left untouched, which in
 // our usage means it stays zero-initialized:
@@ -34,7 +34,6 @@
 // * is silent (no crash, no log line, no UI surface),
 // * is permanent (the on-disk state is now permanently
 // compromised).
-// Multiple security reviews independently flagged this.
 // grok-4.20, gemini-3.1-pro) flagged this exact pattern. The
 // CRITICAL severity is shared by all five.
 // The remediation is mechanical: every call site must check the
@@ -90,6 +89,78 @@ public enum SecureRandom {
         }
     }
 
+    #if DEBUG
+    // ------------------------------------------------------------------
+    // Test-only deterministic-sequence seam.
+    // Cross-platform vector tests (StrongboxPortabilityVectorTests on
+    // iOS, StrongboxPortabilityVectorTest on Android) need to drive
+    // the strongbox create + persist pipeline with PRE-CHOSEN bytes
+    // for the scrypt salt, the random `mainKey`, and every AES-GCM
+    // nonce, so the resulting slot file is byte-identical to the
+    // golden fixture. The seam below is conditionally compiled into
+    // DEBUG builds only; a release build cannot accidentally consume
+    // a deterministic sequence (the `else` arm of the `#if` guard
+    // does not exist).
+    // Usage:
+    //   SecureRandom.withDeterministicSequence(
+    //       Data([0xAA, 0xBB, ...])) {
+    //       try createNewStrongbox(password: "...")
+    //   }
+    // The closure runs with `bytes(_:)` returning slices of the
+    // supplied byte sequence in call order. The seam is per-thread
+    // (Thread.threadDictionary-backed) so concurrent test cases
+    // do not interfere. A test that consumes more bytes than the
+    // pre-loaded sequence holds gets a precondition failure (loud
+    // signal that the fixture was authored with the wrong byte
+    // budget).
+    // ------------------------------------------------------------------
+
+    private static let deterministicQueueKey = "org.quantumcoin.SecureRandom.deterministic"
+
+    private final class DeterministicState {
+        var bytes: Data
+        var cursor: Int = 0
+        init(_ b: Data) { self.bytes = b }
+    }
+
+    /// Run `block` with `SecureRandom.bytes(_:)` returning slices
+    /// of `sequence` in call order. Restores the prior random
+    /// source on exit. DEBUG-only; never present in release
+    /// binaries. Used exclusively by `StrongboxPortabilityVectorTests`
+    /// to reproduce a golden slot file byte-for-byte from the
+    /// shared `tests/fixtures/strongbox-v3-vectors/` inputs.
+    public static func withDeterministicSequence<T>(
+        _ sequence: Data,
+        body: () throws -> T
+    ) rethrows -> T {
+        let dict = Thread.current.threadDictionary
+        let prior = dict[deterministicQueueKey] as? DeterministicState
+        dict[deterministicQueueKey] = DeterministicState(sequence)
+        defer {
+            if let prior = prior {
+                dict[deterministicQueueKey] = prior
+            } else {
+                dict.removeObject(forKey: deterministicQueueKey)
+            }
+        }
+        return try body()
+    }
+
+    private static func consumeDeterministic(_ count: Int) -> Data? {
+        guard let state = Thread.current.threadDictionary[deterministicQueueKey]
+            as? DeterministicState else { return nil }
+        precondition(state.cursor + count <= state.bytes.count,
+            "SecureRandom.deterministic sequence exhausted: "
+            + "asked for \(count) bytes at cursor \(state.cursor), "
+            + "have \(state.bytes.count) bytes total")
+        let lo = state.bytes.startIndex + state.cursor
+        let hi = lo + count
+        let slice = state.bytes.subdata(in: lo..<hi)
+        state.cursor += count
+        return slice
+    }
+    #endif
+
     /// Draw `count` cryptographically-secure random bytes from
     /// `kSecRandomDefault`. Throws `Error.osStatus` on RNG
     /// failure; the destination buffer is NEVER returned in a
@@ -106,6 +177,11 @@ public enum SecureRandom {
             // safe value rather than a precondition failure.
             return Data()
         }
+        #if DEBUG
+        if let injected = consumeDeterministic(count) {
+            return injected
+        }
+        #endif
         var out = [UInt8](repeating: 0, count: count)
         let status = SecRandomCopyBytes(kSecRandomDefault, count, &out)
         guard status == errSecSuccess else {

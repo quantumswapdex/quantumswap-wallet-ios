@@ -395,6 +395,24 @@ public final class BlockchainNetworkAddViewController: UIViewController, HomeScr
     /// JSON editor, hinting that long lines scroll horizontally.
     private weak var jsonScrollRef: UIScrollView?
 
+    /// Outer vertical scroll view that wraps the entire form so the
+    /// JSON editor + Add pill stay reachable when the on-screen
+    /// keyboard is docked. Promoted to an instance property so the
+    /// `handleTextViewDidBeginEditing` observer can call
+    /// `scrollRectToVisible` from outside `viewDidLoad`. The bottom
+    /// anchor uses the same hybrid `safeAreaLayoutGuide.bottomAnchor`
+    /// (defaultHigh) + `lessThanOrEqualTo
+    /// keyboardLayoutGuide.topAnchor` (required) pair as
+    /// `HomeWalletViewController`, so the scroll view sits at the
+    /// safe-area bottom when no keyboard is docked and shrinks to
+    /// the keyboard top when one is.
+    private let outerScroll = UIScrollView()
+
+    /// Weak ref to the right-aligned Add-button row. Held so the
+    /// keyboard-avoidance observer can union the JSON editor and
+    /// the Add pill into a single visible rect.
+    private weak var addRowRef: UIStackView?
+
     public override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
@@ -480,33 +498,77 @@ public final class BlockchainNetworkAddViewController: UIViewController, HomeScr
         addRow.addArrangedSubview(spacer)
         addRow.addArrangedSubview(addButton)
         addRow.translatesAutoresizingMaskIntoConstraints = false
+        self.addRowRef = addRow
 
-        [backBar, title, topRule, subtitle, midRule, jsonScroll, addRow].forEach(view.addSubview)
+        // Plain content container that holds every form row. Pinned
+        // to `outerScroll.contentLayoutGuide` so its intrinsic
+        // height drives the scroll view's contentSize, and width
+        // matches the scroll view's frame so leading/trailing
+        // anchors here translate one-to-one to what the previous
+        // direct-to-`view` layout produced.
+        let containerView = UIView()
+        containerView.translatesAutoresizingMaskIntoConstraints = false
+
+        outerScroll.translatesAutoresizingMaskIntoConstraints = false
+        outerScroll.alwaysBounceVertical = true
+        outerScroll.keyboardDismissMode = .interactive
+        view.addSubview(outerScroll)
+        outerScroll.addSubview(containerView)
+
+        [backBar, title, topRule, subtitle, midRule, jsonScroll, addRow].forEach(containerView.addSubview)
+
+        // Hybrid bottom-anchor pair (see `HomeWalletViewController`
+        // and the keyboard-avoidance plan):
+        //   - `safeBottom` (defaultHigh) keeps `outerScroll`'s
+        //     bottom edge at the safe-area bottom when the keyboard
+        //     is hidden, preserving the legacy layout.
+        //   - `kbCap` (required) caps the scroll view's bottom to
+        //     the keyboard top whenever the keyboard is docked, so
+        //     the JSON editor + Add pill never sit behind the
+        //     keyboard.
+        let safeBottom = outerScroll.bottomAnchor.constraint(
+            equalTo: view.safeAreaLayoutGuide.bottomAnchor)
+        safeBottom.priority = .defaultHigh
+        let kbCap = outerScroll.bottomAnchor.constraint(
+            lessThanOrEqualTo: view.keyboardLayoutGuide.topAnchor)
+        kbCap.priority = .required
 
         NSLayoutConstraint.activate([
-                backBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-                backBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-                backBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+                outerScroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+                outerScroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                outerScroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                safeBottom,
+                kbCap,
+
+                containerView.topAnchor.constraint(equalTo: outerScroll.contentLayoutGuide.topAnchor),
+                containerView.leadingAnchor.constraint(equalTo: outerScroll.contentLayoutGuide.leadingAnchor),
+                containerView.trailingAnchor.constraint(equalTo: outerScroll.contentLayoutGuide.trailingAnchor),
+                containerView.bottomAnchor.constraint(equalTo: outerScroll.contentLayoutGuide.bottomAnchor),
+                containerView.widthAnchor.constraint(equalTo: outerScroll.frameLayoutGuide.widthAnchor),
+
+                backBar.topAnchor.constraint(equalTo: containerView.topAnchor, constant: 8),
+                backBar.leadingAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 16),
+                backBar.trailingAnchor.constraint(equalTo: containerView.trailingAnchor, constant: -16),
 
                 title.topAnchor.constraint(equalTo: backBar.bottomAnchor, constant: 8),
-                title.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-                title.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+                title.leadingAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 16),
+                title.trailingAnchor.constraint(equalTo: containerView.trailingAnchor, constant: -16),
 
                 topRule.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8),
-                topRule.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-                topRule.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+                topRule.leadingAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 16),
+                topRule.trailingAnchor.constraint(equalTo: containerView.trailingAnchor, constant: -16),
 
                 subtitle.topAnchor.constraint(equalTo: topRule.bottomAnchor, constant: 8),
-                subtitle.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-                subtitle.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+                subtitle.leadingAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 16),
+                subtitle.trailingAnchor.constraint(equalTo: containerView.trailingAnchor, constant: -16),
 
                 midRule.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 8),
-                midRule.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-                midRule.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+                midRule.leadingAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 16),
+                midRule.trailingAnchor.constraint(equalTo: containerView.trailingAnchor, constant: -16),
 
                 jsonScroll.topAnchor.constraint(equalTo: midRule.bottomAnchor, constant: 12),
-                jsonScroll.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-                jsonScroll.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+                jsonScroll.leadingAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 16),
+                jsonScroll.trailingAnchor.constraint(equalTo: containerView.trailingAnchor, constant: -16),
                 // Compact 160pt fixed height (down from 220pt) - matches
                 // the requested smaller editor; the rest of the screen now
                 // breathes between the editor and the right-aligned Add
@@ -525,11 +587,13 @@ public final class BlockchainNetworkAddViewController: UIViewController, HomeScr
                 textView.bottomAnchor.constraint(equalTo: jsonScroll.contentLayoutGuide.bottomAnchor, constant: -4),
 
                 // Add button row sits 12pt below the (now compact) JSON
-                // editor instead of being pinned to the safe-area floor.
+                // editor; its bottom is pinned to the container's
+                // bottom (16pt slack) so `outerScroll`'s contentSize
+                // tracks the full form height.
                 addRow.topAnchor.constraint(equalTo: jsonScroll.bottomAnchor, constant: 12),
-                addRow.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-                addRow.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-                addRow.bottomAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
+                addRow.leadingAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 16),
+                addRow.trailingAnchor.constraint(equalTo: containerView.trailingAnchor, constant: -16),
+                addRow.bottomAnchor.constraint(equalTo: containerView.bottomAnchor, constant: -16),
 
                 addButton.heightAnchor.constraint(equalToConstant: 43),
                 addButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 96)
@@ -538,6 +602,43 @@ public final class BlockchainNetworkAddViewController: UIViewController, HomeScr
         // Apply alpha-dim press feedback to the Add button and back
         // arrow.
         view.installPressFeedbackRecursive()
+
+        // Keyboard avoidance: when the user focuses the JSON
+        // `UITextView`, scroll the union of the editor's container
+        // (`jsonScroll`) and the Add-row's frame into the visible
+        // region of `outerScroll`. The hybrid bottom-anchor on
+        // `outerScroll` already shrunk its visible bounds to
+        // exclude the keyboard, so `scrollRectToVisible` is
+        // working against the post-keyboard viewport.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleTextViewDidBeginEditing(_:)),
+            name: UITextView.textDidBeginEditingNotification,
+            object: nil)
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    /// Scrolls the union of the JSON editor and the Add-button row
+    /// above the on-screen keyboard. Deferred one runloop tick so
+    /// the `keyboardLayoutGuide`-driven layout pass on `outerScroll`
+    /// has completed before `scrollRectToVisible` runs.
+    @objc private func handleTextViewDidBeginEditing(_ note: Notification) {
+        guard let tv = note.object as? UITextView,
+            tv.isDescendant(of: outerScroll) else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self,
+                let jsonScroll = self.jsonScrollRef,
+                let addRow = self.addRowRef else { return }
+            self.view.layoutIfNeeded()
+            var target = jsonScroll.convert(jsonScroll.bounds, to: self.outerScroll)
+            target = target.insetBy(dx: 0, dy: -8)
+            let addRect = addRow.convert(addRow.bounds, to: self.outerScroll)
+            target = target.union(addRect)
+            self.outerScroll.scrollRectToVisible(target, animated: true)
+        }
     }
 
     public override func viewDidAppear(_ animated: Bool) {
@@ -579,7 +680,7 @@ public final class BlockchainNetworkAddViewController: UIViewController, HomeScr
     /// Rejects every other scheme (ftp://, ws://, file://, plain
     /// `http://` — see ) and any non-URL-shaped string so a
     /// malformed paste can't bypass the hostname format gate.
-    /// (notes for reviewers):/// plain `http://` is REJECTED outright. Previously the
+    /// Plain `http://` is REJECTED outright. Previously the
     /// validator accepted both `http://` and `https://` and
     /// `ensureHttps` left `http://` untouched on the way into the
     /// strongbox. The combined effect was that a user (or pasteboard
@@ -699,8 +800,10 @@ public final class BlockchainNetworkAddViewController: UIViewController, HomeScr
         // Step 2 - mirror Android's six validation gates verbatim,
         // including the user-visible messages, so the iOS UX reads
         // identically. Each failure surfaces a modal error and bails.
+        // Copy flows through `en_us.json` accessors so future locale
+        // changes update both platforms in lockstep.
         if !rpcEndpoint.lowercased().hasPrefix("https://") {
-            presentError("RPC Endpoint must use https://")
+            presentError(L.getNetworkRpcMustBeHttpsByErrors())
             return
         }
         if let url = URL(string: rpcEndpoint),
@@ -710,24 +813,44 @@ public final class BlockchainNetworkAddViewController: UIViewController, HomeScr
         Self.isValidHostname(host) {
             // valid
         } else {
-            presentError("RPC Endpoint URL is not a valid https host.")
+            presentError(L.getNetworkRpcInvalidHostByErrors())
             return
         }
         if !Self.isValidScanLikeDomain(scanApiDomain) {
-            presentError("Scan API domain is not a valid hostname.")
+            presentError(L.getNetworkScanInvalidHostByErrors())
             return
         }
         if !Self.isValidScanLikeDomain(blockExplorerDomain) {
-            presentError("Block explorer domain is not a valid hostname.")
+            presentError(L.getNetworkExplorerInvalidHostByErrors())
             return
         }
         if !Self.isValidBlockchainName(blockchainName) {
-            presentError("Blockchain name must be 1-\(Self.blockchainNameMaxLen) letters/digits/_/-/space.")
+            let template = L.getNetworkNameFormatByErrors()
+            presentError(template.replacingOccurrences(
+                of: "[MAX]", with: "\(Self.blockchainNameMaxLen)"))
             return
         }
         let nidRange = NSRange(networkId.startIndex..., in: networkId)
         if Self.networkIdRegex.firstMatch(in: networkId, range: nidRange) == nil {
-            presentError("Network ID must be a positive integer.")
+            presentError(L.getNetworkIdPositiveIntegerByErrors())
+            return
+        }
+
+        // Reject any candidate whose name (case-insensitive, trimmed)
+        // collides with an existing network. Mirrors Android
+        // `BlockchainNetworkAddFragment.isDuplicateNetworkName` so
+        // the user gets a dismissible "A network named "X" already
+        // exists." dialog instead of silently shadowing a previously-
+        // saved chain.
+        let candidate = blockchainName.lowercased()
+        let existing = BlockchainNetworkManager.shared.networks
+        if existing.contains(where: {
+            $0.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased() == candidate
+        }) {
+            let template = L.getNetworkDuplicateNameByErrors()
+            presentError(template.replacingOccurrences(
+                of: "[NAME]", with: blockchainName))
             return
         }
 
@@ -813,7 +936,6 @@ public final class BlockchainNetworkAddViewController: UIViewController, HomeScr
     /// password is preserved for typo-fix retry; the password
     /// field is refocused once the alert is dismissed (handled
     /// inside `showOrangeError`).
-    /// (notes for reviewers):
     /// the `tooManyAttempts` branch surfaces the centralised
     /// lockout copy from `UnlockAttemptLimiter` so the user
     /// understands the gate is throttling them by design. The

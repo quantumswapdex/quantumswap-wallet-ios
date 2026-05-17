@@ -6,7 +6,6 @@
 // Diagnostic console output is gated behind AndroidBridge.isDebug()
 // so release builds never stringify exception state (which could contain
 // sensitive argument values) into logcat via onConsoleMessage.
-// (notes for reviewers):
 // the diagnostic output below is further restricted to
 // log only opaque category tokens plus the requestId. The raw
 // exception message and any payload-derived field is NEVER
@@ -105,7 +104,6 @@ function hexToBytes(hex) {
  return bytes;
 }
 
-// (notes for reviewers):
 // symmetric binary channels between Swift and the JS
 // bridge. The QuantumCoin SDK already returns the private and
 // public key bytes as Uint8Array (`wallet.signingKey.privateKeyBytes`
@@ -116,7 +114,6 @@ function hexToBytes(hex) {
 // for the signing handler. JS strings are immutable, so every
 // such intermediate base64 string lived in V8's string pool until
 // GC, which made true zeroization impossible.
-//
 // The new channel routes raw bytes via two synchronous XHR helpers
 // `stagePendingResultBinary` (JS -> Swift) and `pullPayloadBinary`
 // (Swift -> JS). Each call uses a per-(rid, key) capability token
@@ -146,7 +143,6 @@ function pullPayloadBinary(rid, key) {
 }
 
 function stagePendingResultBinary(rid, key, uint8) {
- // (notes for reviewers):
 // WKURLSchemeHandler on iOS does NOT reliably
  // receive XHR POST bodies for custom schemes (the body is
  // stripped by WebKit before reaching the scheme handler).
@@ -287,7 +283,6 @@ function pullPayload(requestId) {
  }
 }
 
-// (notes for reviewers):
 // The name "zeroString" is historical and slightly misleading. JS
 // strings are IMMUTABLE; the bytes that already live in the V8
 // string pool from the previous `pullPayload` parse cannot be
@@ -445,8 +440,7 @@ var bridge = {
  }
  },
 
-// (notes for reviewers): native-coin send.
- //
+// native-coin send.
  // We use the SDK's high-level `wallet.sendTransaction(...)`
  // surface (the same call shape the Android wallet uses, see
  // `quantum-coin-wallet-android/app/src/main/assets/bridge.html`
@@ -461,7 +455,6 @@ var bridge = {
  //   3. Calls `provider.sendTransaction(rawBytes)` to broadcast.
  //   4. Returns a `TransactionResponse` whose `.hash` field is
  //      the locally-derived hash from step 2.
- //
  // We surface that `tx.hash` to Swift as `txHash`. Because the
  // hash is derived from the bytes WE signed (not from anything
  // the RPC tells us), the user can independently verify the
@@ -473,7 +466,6 @@ var bridge = {
  // user-visible block-explorer link in
  // `TransactionSentDialogViewController` for the recommended
  // verification path.
- //
  // Why this shape (vs. low-level `signRawTransaction`)
  //   The previous implementation tried to call
  //   `QuantumCoinSDK.signRawTransaction(...)` directly to
@@ -520,8 +512,7 @@ var bridge = {
  }
  },
 
-// (notes for reviewers): ERC-20-style token transfer.
- //
+// ERC-20-style token transfer.
  // Same pattern as `sendTransaction` above, but the inner
  // transaction is an ERC-20 `transfer(address,uint256)` call.
  // We use the SDK's `IERC20.connect(contract, wallet)` to
@@ -534,7 +525,6 @@ var bridge = {
  //      nonce / chainId / from-address.
  //   3. Signs locally and derives `tx.hash` from signed bytes.
  //   4. Broadcasts through the connected provider.
- //
  // This is byte-for-byte the same flow the Android wallet ships
  // (see `quantum-coin-wallet-android/.../bridge.html`
  // `sendTokenTransaction`); both wallets produce identical
@@ -594,8 +584,6 @@ var bridge = {
  // expect: a single transposed hex digit changes the case-checksum
  // hash and therefore many letter positions, making the difference
  // obvious.
- //
- // (notes for reviewers):
 // the previous implementation had a `toLowerCase()` fallback
  // for "older bundle / SDK symbol missing" so the review
  // dialog would still render *something*. That fallback was a
@@ -649,7 +637,6 @@ var bridge = {
  if (!(await ensureInitialized(requestId))) return;
  payload = pullPayload(requestId);
  if (!payload) return;
- // (notes for reviewers):
 // the seed-words branch is the only user-facing path
  // (the create-wallet handler stages the just-generated seed
  // words to a single-shot JSON envelope and we re-encrypt
@@ -774,7 +761,6 @@ var bridge = {
  if (!(await ensureInitialized(requestId))) return;
  payload = pullPayload(requestId);
  if (!payload) return;
- // (notes for reviewers):
 // defense-in-depth minimum-bound check on the
  // scrypt parameters. Swift's `JsBridge.scryptDerive`
  // already passes the canonical

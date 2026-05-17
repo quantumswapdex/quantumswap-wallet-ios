@@ -46,7 +46,7 @@ public final class CloudBackupManager: NSObject {
     /// both the picker-completed and picker-cancelled paths so the
     /// encrypted-but-shareable wallet JSON does not linger in the
     /// app's tmp directory after the export finishes.
-    /// design rationale (notes for reviewers): /// The pre-fix flow created `<tmp>/UTC--{ts}--{addr}.wallet`,
+    /// design rationale: /// The pre-fix flow created `<tmp>/UTC--{ts}--{addr}.wallet`,
     /// handed it to `UIDocumentPickerViewController`, and never
     /// deleted it. The file persisted indefinitely (iOS may evict
     /// `tmp/` under disk-pressure but does not promise this; on a
@@ -326,7 +326,6 @@ public final class CloudBackupManager: NSObject {
     /// Cloud-backup outcome enum returned from `writeWalletFile`.
     /// Replaces the previous `URL?` return shape so the caller
     /// can distinguish:
-    ///
     /// What it closes
     ///   The historical caller fired the green "backup saved"
     ///   toast immediately after `writeWalletFile` returned a
@@ -346,7 +345,6 @@ public final class CloudBackupManager: NSObject {
     ///   "submitted, not yet uploaded" dialog for iCloud
     ///   destinations and the existing toast for local
     ///   destinations.
-    ///
     /// Why this shape
     ///   - Three cases (local-completed, cloud-submitted, failed)
     ///     instead of a `Bool isCloud` flag because the failure
@@ -357,7 +355,6 @@ public final class CloudBackupManager: NSObject {
     ///     caller can format the user-visible message
     ///     ("Submitted to: <folder>/<file>") without re-querying
     ///     the file system.
-    ///
     /// Tradeoffs
     ///   - The detection heuristic (`URLResourceKey.isUbiquitousItemKey`)
     ///     can fail to populate on an unusual file provider; we
@@ -366,7 +363,6 @@ public final class CloudBackupManager: NSObject {
     ///     iCloud — would surface the warning dialog on every
     ///     non-iCloud Files-app target and train the user to
     ///     dismiss it.
-    ///
     /// Cross-references
     ///   - `BackupExporter.reencryptAndExport`: switches on this
     ///     outcome and routes the iCloud branch through the
@@ -453,7 +449,6 @@ public final class CloudBackupManager: NSObject {
                 Toast.showError(Localization.shared.getBackupFailedByLangValues())
                 return .failed
             }
-            // (notes for reviewers):
 // detect whether the destination URL is
             // iCloud-managed by querying the
             // `URLResourceKey.isUbiquitousItemKey` resource value.
@@ -553,7 +548,6 @@ public final class CloudBackupManager: NSObject {
     }
 
     private func persistBookmark(_ url: URL) {
-        // (notes for reviewers):
 // the original was
         // `let ok = url.startAccessingSecurityScopedResource`
         // which captures the *method reference* WITHOUT
@@ -664,7 +658,6 @@ extension CloudBackupManager: UIDocumentPickerDelegate {
         .replacingOccurrences(of: "[FILENAME]", with: filename)
     }
 
-    /// (notes for reviewers):
     /// Substitute `[FOLDER]` / `[FILENAME]` placeholders in the
     /// `backup-submitted-cloud-message` localized template with
     /// the destination URL's parent-directory name and file name.

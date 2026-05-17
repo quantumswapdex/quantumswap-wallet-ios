@@ -8,8 +8,7 @@
 // the screen is being mirrored (AirPlay, QuickTime), recorded
 // (Control Center > Screen Recording), or displayed in a CarPlay /
 // AirPlay receiver.
-//
-// (notes for reviewers): for any
+// for any
 // screen that displays freshly-decrypted secret material (BIP39 seed
 // words on the create-wallet reveal step, the post-unlock seed reveal
 // in `RevealWalletViewController`, etc.), we attach a
@@ -17,9 +16,7 @@
 // `UIScreen.isCaptured == true`, the protected subview is hidden and a
 // warning view is shown in its place. When capture stops the warning
 // view is removed and the protected subview is revealed.
-//
 // Tradeoffs:
-//
 // * iOS in-app screenshots (Power + Volume) are NOT detected by
 //   `UIScreen.isCaptured`. There is `UIApplication.userDidTakeScreenshot`
 //   but it fires *after* the screenshot is taken; it cannot prevent the
@@ -29,11 +26,9 @@
 //   We accept the screenshot residual risk; the VoiceOver
 //   suppression and the existing 30 s pasteboard expiry plus the
 //   "Click to reveal" gating already narrow the surface.
-//
 // * The hide path is best-effort: a recording app that starts capture
 //   immediately while the user is staring at the seed will record the
 //   transition frame. The defence is reactive, not proactive.
-//
 // * Apple-internal screen capture APIs (e.g. `_UIWindow.snapshotView`)
 //   used by the OS task switcher are also not blocked here. The
 //   existing app-snapshot blanker on `applicationWillResignActive`
@@ -66,7 +61,6 @@ public final class ScreenCaptureGuard {
             selector: #selector(handleCaptureChanged),
             name: UIScreen.capturedDidChangeNotification,
             object: nil)
-        // (notes for reviewers):
 // we MUST attempt activation now because the caller may
         // already have wired both views into the same hierarchy
         // (e.g. `RevealWalletViewController` adds the grid to its
@@ -118,7 +112,6 @@ public final class ScreenCaptureGuard {
     /// on a prior attempt). Returns false if the views are not
     /// yet co-resident in a single hierarchy, so the caller can
     /// retry later.
-    /// (notes for reviewers):
     /// the common-ancestor pre-check is what closes the original
     /// crash class - `NSLayoutConstraint.activate` raises an
     /// `NSGenericException` rather than returning an error, so

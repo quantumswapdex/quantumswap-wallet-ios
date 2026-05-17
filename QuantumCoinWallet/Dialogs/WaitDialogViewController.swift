@@ -14,7 +14,6 @@ import UIKit
 /// other phases clear the secondary line. The dialog reference
 /// is held weakly so a dialog dismissed early by the success
 /// path doesn't keep itself alive.
-/// (notes for reviewers):
 /// the wait dialog's main "Please wait..." message stays
 /// visible for the entire write — this helper only updates the
 /// secondary slot. The design invariant is "wallet operations
@@ -156,7 +155,6 @@ public final class WaitDialogViewController: ModalDialogViewController {
     /// entire time, with the status line appearing and
     /// disappearing as the operation progresses through phases
     /// (write -> verify -> promote -> commit).
-    /// (notes for reviewers):
     /// The secondary slot is intentionally a separate UILabel
     /// rather than reusing `detailLabel` (monospaced; reserved
     /// for the address-being-decrypted line in RestoreFlow) or

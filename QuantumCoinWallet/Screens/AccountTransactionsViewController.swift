@@ -79,6 +79,11 @@ HomeScreenViewTypeProviding {
     /// cancellation all release it.
     private var isLoading: Bool = false
 
+    /// Top action bar with the back / refresh icon swap. Held onto so
+    /// the load task can swap the icon for a spinner while the page
+    /// fetch is in flight.
+    private weak var topBarRow: BackBarRow?
+
     public override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
@@ -90,6 +95,7 @@ HomeScreenViewTypeProviding {
             backAction: #selector(tapBack),
             refreshAction: #selector(tapRefresh))
         topBar.translatesAutoresizingMaskIntoConstraints = false
+        self.topBarRow = topBar
 
         segmented.selectedSegmentIndex = 0
         segmented.addTarget(self, action: #selector(changeTab), for: .valueChanged)
@@ -259,7 +265,10 @@ HomeScreenViewTypeProviding {
     }
 
     @objc private func tapRefresh() {
-        loadPage()
+        // User-initiated tap: error path surfaces a dismissible dialog
+        // and leaves the existing rows on screen so transient API
+        // hiccups do not blank the table.
+        loadPage(manual: true)
     }
 
     @objc private func handleNetworkConfigDidChange() {
@@ -315,7 +324,13 @@ HomeScreenViewTypeProviding {
     /// `transaction_message_exits` short-circuit). This prevents a
     /// double-tap on next / prev / refresh from queueing a second
     /// load behind the first.
-    private func loadPage(requested: Int? = nil) {
+    ///
+    /// `manual == true` indicates a user-initiated refresh (tap on
+    /// the top-bar refresh icon). On failure those paths present a
+    /// dismissible error dialog and leave the existing rows visible.
+    /// Auto-driven callers (tab change, network-config change,
+    /// pagination) pass `manual: false` and stay silent on error.
+    private func loadPage(requested: Int? = nil, manual: Bool = false) {
         if isLoading {
             Toast.showError(
                 Localization.shared.getTransactionMessageExitsByLangValues())
@@ -327,8 +342,9 @@ HomeScreenViewTypeProviding {
         lastRequestedPageIndex = pageToRequest
         isLoading = true
         spinner.startAnimating()
+        topBarRow?.refreshSwap?.setLoading(true)
         emptyLabel.isHidden = true
-        Task { [pageToRequest, currentTab] in
+        Task { [pageToRequest, currentTab, manual] in
             // Defer-style cleanup that always runs on the main actor
             // so the spinner-stop and isLoading-release stay on the
             // UI thread regardless of which branch returned. We
@@ -338,6 +354,7 @@ HomeScreenViewTypeProviding {
                 await MainActor.run {
                     self.isLoading = false
                     self.spinner.stopAnimating()
+                    self.topBarRow?.refreshSwap?.setLoading(false)
                 }
             }
             do {
@@ -348,6 +365,7 @@ HomeScreenViewTypeProviding {
                         self.handleResponse(items: r.result ?? [],
                             totalPages: r.totalPages)
                         self.isLoading = false
+                        self.topBarRow?.refreshSwap?.setLoading(false)
                     }
                 } else {
                     let r = try await AccountsApi.accountPendingTransactions(
@@ -356,12 +374,22 @@ HomeScreenViewTypeProviding {
                         self.handleResponse(items: r.result ?? [],
                             totalPages: r.totalPages)
                         self.isLoading = false
+                        self.topBarRow?.refreshSwap?.setLoading(false)
                     }
                 }
             } catch {
                 await releaseGuard()
-                await MainActor.run {
-                    Toast.showError("\(error)")
+                if manual {
+                    await MainActor.run {
+                        // Preserve the already-rendered rows on failure -
+                        // a transient API hiccup should never blank the
+                        // table. Only user-initiated taps surface an
+                        // error dialog; auto-refetches stay silent.
+                        let dlg = MessageInformationDialogViewController.error(
+                            title: Localization.shared.getErrorTitleByLangValues(),
+                            message: "\(error)")
+                        self.present(dlg, animated: true)
+                    }
                 }
             }
         }

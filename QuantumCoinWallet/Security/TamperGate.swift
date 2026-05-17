@@ -7,7 +7,7 @@
 // be unit-tested in isolation and so a future change to the policy
 // (e.g. swapping in a maintained library like `IOSSecuritySuite`)
 // does not have to re-touch the UI plumbing.
-// Why this exists (notes for reviewers):
+// Why this exists:
 // Every other defense in this app rests on the OS-level isolation
 // that iOS gives a sandboxed process: `.completeFileProtection`,
 // Keychain access controls, App-Bound Domains, code-signing of
@@ -213,7 +213,6 @@ public enum TamperGate {
         // dlsym lookup keeps the symbol out of binary-static-
         // analysis tools that historically flagged direct `ptrace`
         // imports.
-        // (notes for reviewers):
 // the call is `denyDebuggerAttach()` with parentheses, NOT
         // a bare expression. The bare-expression form
         // (`denyDebuggerAttach` without parens)
@@ -229,7 +228,6 @@ public enum TamperGate {
     /// Build the full report (bootstrap-cached probes + a fresh
     /// per-call `P_TRACED` check). Safe to call from any thread
     /// after `bootstrap` has run on the main thread.
-    /// (notes for reviewers):
     /// `currentReport()` FAILS CLOSED in shipping Release if
     /// `bootstrap()` has not run. The previous behaviour was
     /// `assertionFailure(...)` (a no-op in Release) followed by
@@ -564,7 +562,6 @@ public enum TamperGate {
             sysctl(mibPtr.baseAddress, UInt32(mibPtr.count), &info, &size, nil, 0)
         }
         if result != 0 {
-            // (notes for reviewers):
 // the previous policy fell OPEN here on the
             // theory that a sysctl failure is an OS oddity rather
             // than evidence of tampering. That is wrong in a Release

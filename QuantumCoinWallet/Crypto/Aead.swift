@@ -10,7 +10,7 @@
 // is rejected before reaching `AES.GCM.SealedBox`. See the
 // "hardening" note inside `open(_:keyBytes:)` for the full
 // rationale.
-// Why this exists (notes for reviewers):
+// Why this exists:
 // The original implementation lived inline as private
 // `encryptEnvelope` / `decryptEnvelope` helpers next to the
 // storage code. Pulling them into a dedicated crypto-

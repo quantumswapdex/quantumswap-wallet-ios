@@ -32,7 +32,6 @@ public enum Constants {
 
     // MARK: - Network / active-session mutable state
 
-    // (notes for reviewers):
 // these four mirrors are the legacy "any-thread read" path used
     // by UI surfaces (address-strip explorer button, network name
     // label, token-row contract link, etc.). The CANONICAL source
@@ -40,7 +39,6 @@ public enum Constants {
     // `NetworkConfig.shared` (an actor) plus the
     // `NetworkSnapshot` that signing call sites capture at "Review"
     // tap and re-assert at "Submit" time. See `NetworkConfig.swift`.
-    //
     // The mirrors used to be declared `public nonisolated(unsafe)
     // static var` and were mutated from background threads
     // (`BlockchainNetworkManager.applyActive` runs in a detached
@@ -49,7 +47,6 @@ public enum Constants {
     // is NOT atomic on assignment; concurrent read-while-write is
     // a documented data race that is undefined behaviour - in
     // practice memory corruption and crash under load.
-    //
     // The fix is to gate every mutation and every read through a
     // single `NSLock`. Callers continue to write `Constants.SCAN_API_URL
     // = ...` and read `let s = Constants.SCAN_API_URL`; only the
@@ -57,7 +54,6 @@ public enum Constants {
     // pays one lock acquire/release - cheap and contention-free
     // for the read pattern (a handful of accesses per UI event
     // versus many millions per second the lock could service).
-    //
     // For call sites that need all four values atomically together
     // (e.g. composing a deep link or a deterministic signing
     // context), use `Constants.networkSnapshot()` so a mid-flight

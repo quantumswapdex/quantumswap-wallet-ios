@@ -52,7 +52,6 @@ public final class JsEngine: NSObject {
     private let schemeHandler = AppAssetsSchemeHandler()
     private let pendingCallbacks = PendingCallbackStore()
     private let pendingPayloads = PendingPayloadStore()
-    /// (notes for reviewers):
     /// two symmetric binary channels staging arbitrary
     /// `Data` between Swift and the JS bridge:
     /// * `pendingBinaryOutbound` is filled by Swift via
@@ -432,7 +431,6 @@ public final class JsEngine: NSObject {
     /// if the presented token matches the reserved token. The
     /// stored entry stays until the Swift-side caller consumes it
     /// via `consumePendingResultBinary`.
-    /// (notes for reviewers):
     /// retained as a `fileprivate` entry point for the
     /// scheme-handler path. The script-message path uses the
     /// `pushBinaryFromMessage` wrapper below; both ultimately
@@ -481,7 +479,6 @@ extension JsEngine: WKNavigationDelegate {
     public func webView(_ webView: WKWebView,
         didFailProvisionalNavigation navigation: WKNavigation!,
         withError error: Error) {
-        // (notes for reviewers):
 // the URL is intentionally NOT included in
         // the surfaced message. The full
         // `appassets:///bridge.html` path leaks the WKWebView
@@ -539,7 +536,6 @@ private final class ScriptMessageBroker: NSObject, WKScriptMessageHandler {
         let method = body["m"] as? String
         else { return }
         guard let owner = owner else { return }
-        // (notes for reviewers):
 // the `pushBinary` route accepts a
         // mixed-type args array (`[String, String, String, [NSNumber]]`)
         // because the JS side passes a numeric array as the
@@ -592,7 +588,7 @@ private final class ScriptMessageBroker: NSObject, WKScriptMessageHandler {
 /// to files in the main bundle's `Resources` directory, and resolves
 /// `appassets:///bridge-payload/<requestId>` to the staged JSON payload.
 /// Mirrors Android's `WebViewAssetLoader` one-to-one.
-/// hardening (notes for reviewers):
+/// hardening:
 /// 1. **Explicit bundle-resource allowlist (`bundleAllowlist`).** The
 /// previous implementation accepted any filename and forwarded it to
 /// `Bundle.main.url(forResource:)`. That made any bundle resource
@@ -711,7 +707,6 @@ private final class AppAssetsSchemeHandler: NSObject, WKURLSchemeHandler {
         if url.path.hasPrefix("/bridge-payload/") {
             // JS-side pull of a staged payload. URL shape:
             // appassets:///bridge-payload/<requestId>/<token>
-            // (notes for reviewers):
 // the previous URL shape was
             // `appassets:///bridge-payload/<requestId>` with no
             // capability check, relying on WebKit's CORS
@@ -925,7 +920,7 @@ private final class PendingCallbackStore: @unchecked Sendable {
 
 /// Pending payload registry with size cap + TTL. Mirrors
 /// `WebViewManager.pendingPayloads` and its L-02 sweeping guarantees.
-/// (notes for reviewers): each
+/// each
 /// staged payload also carries a per-request capability token
 /// (32 random bytes, hex-encoded) generated at staging time. The
 /// JS-side `appassets:///bridge-payload/<rid>/<token>` XHR must
@@ -1002,7 +997,7 @@ private final class PendingPayloadStore: @unchecked Sendable {
 
     /// 32 random bytes hex-encoded. The capability token is opaque
     /// to JS; only the SchemeHandler ever inspects it.
-    /// (notes for reviewers): the
+    /// the
     /// token is the gate that prevents a same-origin JS error from
     /// pulling a different request's payload off the staging map.
     /// We MUST refuse to issue a token if the OS RNG fails - the
@@ -1070,7 +1065,7 @@ public enum JsEngineError: Error, CustomStringConvertible {
 /// keys by `(requestId, key)` so a single requestId can stage multiple
 /// independent binary slots (e.g. the wallet decrypt handler stages
 /// `privateKey` AND `publicKey` for the same rid).
-/// (notes for reviewers): the reason
+/// the reason
 /// this store exists separately from `PendingPayloadStore` is the
 /// "data ever stringified" question. Strings in Swift / JS are
 /// immutable: once a private key is base64-encoded into a `String` it

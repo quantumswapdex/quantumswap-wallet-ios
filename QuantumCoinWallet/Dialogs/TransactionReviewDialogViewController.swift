@@ -19,7 +19,7 @@
 // Type I agree to confirm:
 // <text field>
 // [ Cancel ] [ OK ]
-// design notes for reviewers:
+// Design notes:
 // The dialog is the user's last user-comprehensible chance to
 // abort a transaction before scrypt unlocks the strongbox and a key
 // binds the signature. The hardening that survives in this build:
@@ -220,13 +220,62 @@ public final class TransactionReviewDialogViewController: ModalDialogViewControl
         stack.alignment = .fill
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(stack)
+
+        // Wrap the section stack in an inner `UIScrollView` so the
+        // dialog body can scroll independently of the card. The
+        // base `ModalDialogViewController` caps `card.bottomAnchor`
+        // to `view.keyboardLayoutGuide.topAnchor - 12`, which means
+        // on tall confirmations (asset / contract / from / to /
+        // amount / network / "I agree" / Cancel + OK) the card
+        // height is bounded by the available space above the
+        // keyboard. The cap below + the inner scroll let the user
+        // reach `agreeField` and the OK button on iPhone SE /
+        // iPhone 13 mini even with the on-screen keyboard docked.
+        let bodyScroll = UIScrollView()
+        bodyScroll.translatesAutoresizingMaskIntoConstraints = false
+        bodyScroll.alwaysBounceVertical = true
+        bodyScroll.keyboardDismissMode = .interactive
+        card.addSubview(bodyScroll)
+        bodyScroll.addSubview(stack)
+        // Cap the card height so it never exceeds the safe-area
+        // height; combined with the inherited centerY pull-up and
+        // keyboard-cap from `ModalDialogViewController`, the card
+        // now stays inside the safe area on every device while the
+        // inner scroll handles overflow.
+        let cardHeightCap = card.heightAnchor.constraint(
+            lessThanOrEqualTo: view.safeAreaLayoutGuide.heightAnchor,
+            constant: -32)
+        cardHeightCap.priority = .required
+
+        // Make the scroll view (and therefore the card) grow to
+        // fit the stack's intrinsic height when there is room. A
+        // `UIScrollView`'s `contentLayoutGuide` does NOT drive the
+        // scroll view's own height, so without this pair the card
+        // would collapse to whatever ambient height autolayout
+        // can find (which here is zero, producing a thin white
+        // stripe). The `.defaultHigh` priority lets the required
+        // `cardHeightCap` win on small screens, at which point the
+        // bodyScroll becomes shorter than the stack and the inner
+        // scroll engages.
+        let bodyScrollFitsContent = bodyScroll.heightAnchor.constraint(
+            equalTo: bodyScroll.contentLayoutGuide.heightAnchor)
+        bodyScrollFitsContent.priority = .defaultHigh
+
         NSLayoutConstraint.activate([
-                stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 20),
-                stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -20),
-                stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 20),
-                stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
-                card.widthAnchor.constraint(equalToConstant: 340)
+                bodyScroll.topAnchor.constraint(equalTo: card.topAnchor, constant: 20),
+                bodyScroll.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -20),
+                bodyScroll.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 20),
+                bodyScroll.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
+                bodyScrollFitsContent,
+
+                stack.topAnchor.constraint(equalTo: bodyScroll.contentLayoutGuide.topAnchor),
+                stack.bottomAnchor.constraint(equalTo: bodyScroll.contentLayoutGuide.bottomAnchor),
+                stack.leadingAnchor.constraint(equalTo: bodyScroll.contentLayoutGuide.leadingAnchor),
+                stack.trailingAnchor.constraint(equalTo: bodyScroll.contentLayoutGuide.trailingAnchor),
+                stack.widthAnchor.constraint(equalTo: bodyScroll.frameLayoutGuide.widthAnchor),
+
+                card.widthAnchor.constraint(equalToConstant: 340),
+                cardHeightCap
             ])
 
         view.installPressFeedbackRecursive()
@@ -268,7 +317,6 @@ public final class TransactionReviewDialogViewController: ModalDialogViewControl
         v.font = mono
         ? UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         : Typography.body(14)
-        // (notes for reviewers):
 // mono branch renders the destination address in
         // a transaction-review confirmation dialog. Previously this
         // was capped at `numberOfLines = 2` with `.byTruncatingMiddle`,
