@@ -57,6 +57,31 @@ open class ModalDialogViewController: UIViewController {
         card.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(dim)
         view.addSubview(card)
+
+        // Keyboard-aware vertical placement:
+        //   - `centerY` keeps the card vertically centered when no
+        //     keyboard is on screen (the legacy behavior every
+        //     ConfirmDialog / MessageInformationDialog caller still
+        //     expects). Lowered to `.defaultHigh - 1` so autolayout
+        //     can break it in favor of `kbCap` once the keyboard
+        //     docks.
+        //   - `kbCap` (required) pulls the card up so its bottom
+        //     edge stays at least 12pt above the on-screen keyboard
+        //     top via `view.keyboardLayoutGuide.topAnchor`. When
+        //     the keyboard is offscreen the guide anchors to the
+        //     bottom of the view, so the cap is trivially satisfied
+        //     and `centerY` wins. When a child dialog auto-focuses
+        //     a text field on present (`UnlockDialogViewController`
+        //     and `BackupPasswordDialog` both do so via
+        //     `focusAndShowKeyboard`), the cap binds and the card
+        //     slides up to keep the password field + primary action
+        //     button visible.
+        let centerY = card.centerYAnchor.constraint(equalTo: view.centerYAnchor)
+        centerY.priority = .defaultHigh - 1
+        let kbCap = card.bottomAnchor.constraint(
+            lessThanOrEqualTo: view.keyboardLayoutGuide.topAnchor,
+            constant: -12)
+        kbCap.priority = .required
         NSLayoutConstraint.activate([
                 dim.topAnchor.constraint(equalTo: view.topAnchor),
                 dim.bottomAnchor.constraint(equalTo: view.bottomAnchor),
@@ -64,7 +89,8 @@ open class ModalDialogViewController: UIViewController {
                 dim.trailingAnchor.constraint(equalTo: view.trailingAnchor),
 
                 card.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-                card.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+                centerY,
+                kbCap,
                 card.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 24),
                 card.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -24),
                 card.widthAnchor.constraint(lessThanOrEqualToConstant: 420)

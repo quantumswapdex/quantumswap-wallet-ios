@@ -52,7 +52,6 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
     private var keyType: Int = Constants.KEY_TYPE_DEFAULT
     private var seedLength: Int = 32
     private var generatedSeed: [String] = []
-    private var generatedWalletJson: String = ""
     private var generatedAddress: String = ""
     private var walletIndex: Int = -1
 
@@ -67,6 +66,18 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
     private var seedRevealed: Bool = false
 
     private let contentStack = UIStackView()
+    /// Outer scroll view that wraps `contentStack`. Promoted to an
+    /// instance property so the keyboard-avoidance observer can
+    /// reach it from outside `viewDidLoad`: the bottom anchor is
+    /// pinned to `view.keyboardLayoutGuide.topAnchor` so the
+    /// visible content region automatically excludes the on-screen
+    /// keyboard, and a `textDidBeginEditingNotification` observer
+    /// scrolls the focused seed-grid cell (plus the Next button
+    /// row) above the keyboard as focus auto-advances. Closes the
+    /// seed-verify / restore-from-seed UX bug where the lower seed
+    /// cells and Next pill sat behind the keyboard on shorter
+    /// devices.
+    private let scroll = UIScrollView()
 
     /// Hides the just-generated seed grid on
     /// `renderSeedShow` whenever the screen is being recorded /
@@ -83,16 +94,38 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         contentStack.spacing = 14
         contentStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let scroll = UIScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.addSubview(contentStack)
         view.addSubview(scroll)
 
+        // Hybrid bottom-anchor pair (see file header / Issue A in
+        // the keyboard-avoidance plan):
+        //   - `safeBottom` (defaultHigh) keeps the scroll view's
+        //     bottom edge at the safe-area bottom when the keyboard
+        //     is hidden, restoring the pre-keyboard-work layout and
+        //     the home-indicator gap. Contrast with the previous
+        //     `equalTo: keyboardLayoutGuide.topAnchor` which, per
+        //     Apple's docs, undocks to the bottom of the *view*
+        //     (not the safe area) when the keyboard is offscreen
+        //     and was producing a small render artifact on iOS 15
+        //     simulators below the Next button.
+        //   - `kbCap` (required) hard-caps the scroll view's bottom
+        //     to the keyboard top whenever the keyboard is docked,
+        //     so the visible content region shrinks to exclude the
+        //     keyboard. Autolayout breaks `safeBottom` in favor of
+        //     `kbCap` while the keyboard is up.
+        let safeBottom = scroll.bottomAnchor.constraint(
+            equalTo: view.safeAreaLayoutGuide.bottomAnchor)
+        safeBottom.priority = .defaultHigh
+        let kbCap = scroll.bottomAnchor.constraint(
+            lessThanOrEqualTo: view.keyboardLayoutGuide.topAnchor)
+        kbCap.priority = .required
         NSLayoutConstraint.activate([
                 scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
                 scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
                 scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-                scroll.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+                safeBottom,
+                kbCap,
                 contentStack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 20),
                 contentStack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -20),
                 contentStack.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor, constant: 20),
@@ -100,7 +133,68 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
                 contentStack.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor, constant: -40)
             ])
 
+        // Bring the focused text field plus the Next button row
+        // above the keyboard whenever focus moves through the seed
+        // grid. Without this, `SeedChipGrid.advanceFocus(after:)`
+        // can hand first-responder status to a cell that the
+        // shrunken scroll region cannot reach by intrinsic content
+        // size alone.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleTextFieldDidBeginEditing(_:)),
+            name: UITextField.textDidBeginEditingNotification,
+            object: nil)
+
         render()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    // MARK: - Keyboard avoidance
+
+    /// Scroll the freshly-focused text field into view together with
+    /// the action row (Next pill) that lives at the bottom of
+    /// `contentStack`. Triggered by `UITextField.textDidBeginEditingNotification`
+    /// so it covers BOTH the initial tap on a seed cell AND the
+    /// auto-advance hop driven by `SeedChipGrid.advanceFocus(after:)`.
+    /// The visible region of `scroll` is already shrunken by the
+    /// `keyboardLayoutGuide`-pinned bottom constraint, but UIKit's
+    /// implicit "scroll responder into view" only fires reliably on
+    /// the first tap and does not factor in the trailing action
+    /// pill; computing the union with the last arranged subview
+    /// (`Next` row) keeps the action button visible too so the user
+    /// can submit without having to dismiss the keyboard first.
+    @objc private func handleTextFieldDidBeginEditing(_ note: Notification) {
+        guard let field = note.object as? UITextField,
+            field.isDescendant(of: scroll) else { return }
+        // Defer the scroll one runloop tick so the
+        // `keyboardLayoutGuide` has applied its new top anchor
+        // (the guide updates synchronously with the keyboard frame
+        // notification, but autolayout has not necessarily run a
+        // layout pass yet when `textDidBeginEditingNotification`
+        // arrives on the very first tap of the screen). Layout
+        // is force-applied below so `scroll.bounds` reflects the
+        // shrunken visible region before we compute the target rect.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.view.layoutIfNeeded()
+            var target = field.convert(field.bounds, to: self.scroll)
+            // Include a small bottom padding so the field is not
+            // flush against the keyboard top.
+            target = target.insetBy(dx: 0, dy: -8)
+            // Union the field rect with the Next-button row (the
+            // last arranged subview of `contentStack`) so both stay
+            // visible. `contentStack` is itself a subview of
+            // `scroll`, so the conversion lands in scroll-content
+            // coordinates.
+            if let actionRow = self.contentStack.arrangedSubviews.last {
+                let actionRect = actionRow.convert(actionRow.bounds, to: self.scroll)
+                target = target.union(actionRect)
+            }
+            self.scroll.scrollRectToVisible(target, animated: true)
+        }
     }
 
     // MARK: - Render
@@ -230,19 +324,13 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
                     // to RestoreFlow so the keystore is bootstrapped with
                     // the user's chosen strongbox password rather than the
                     // per-wallet backup password.
-                    RestoreFlow.shared.onComplete = { [weak self] in
-                        guard let self = self,
-                        RestoreFlow.shared.didImportAny else { return }
-                        self.finishAndRouteHome()
-                    }
-                    RestoreFlow.shared.restoreFromFile(from: self,
-                        strongboxPassword: self.chosenPassword)
+                    self.beginRestoreFromFile()
                     case 3:
                     // Restore from cloud folder. The folder picker is
                     // re-presented every time so the user can switch
                     // folders (the previous "skip if bookmark exists" path
                     // could trap users on an empty folder forever).
-                    self.startCloudRestore(strongboxPassword: self.chosenPassword)
+                    self.beginRestoreFromCloud()
                     default:
                     break
                 }
@@ -268,7 +356,6 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         let title = makeTitle(L.getPhoneBackupByLangValues())
         let topRule = makeRule()
         let body = makeBody(L.getBackupPromptByLangValues())
-        // (notes for reviewers):
 // short-term mitigation. The
         // BACKUP_ENABLED toggle controls only the
         // `isExcludedFromBackup` resource flag on the slot
@@ -326,6 +413,58 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
             }), for: .touchUpInside)
         [back, title, topRule, body, warning, group, bottomRule, wrapPrimaryRight(next)]
         .forEach { contentStack.addArrangedSubview($0) }
+    }
+
+    /// Resolve the strongbox-write password for a restore session and
+    /// invoke `body` with it. During first-time onboarding the user has
+    /// already typed the device password on the Set Wallet Password
+    /// step (cached in `chosenPassword`), so we forward it directly.
+    /// On the post-onboarding "Create or Restore Quantum Wallet" entry
+    /// from the wallets list the screen is reached with an empty
+    /// `chosenPassword`, so we present `UnlockDialogViewController` to
+    /// collect the device password upfront and verify it via the
+    /// existing `bootstrapOrUnlock` round-trip (read-only when the
+    /// snapshot is already loaded). Mirrors Android
+    /// `HomeWalletFragment.ensureStrongboxReadyForRestore`. Closes the
+    /// silent-failure bug where the strongbox-write path was falling
+    /// back to the per-file backup password (which legitimately differs
+    /// from the device password) and every persist threw
+    /// `authenticationFailed` after `appendWallet` had already mutated
+    /// the in-memory snapshot - producing the misleading "Unable to
+    /// decrypt any wallet with that password" alert followed by a
+    /// ghost-wallet "already exists" toast on retry.
+    private func resolveStrongboxWritePassword(_ body: @escaping (String) -> Void) {
+        if !chosenPassword.isEmpty {
+            body(chosenPassword)
+            return
+        }
+        presentUnlockThen { pw in body(pw) }
+    }
+
+    /// Post-onboarding-safe entry into `RestoreFlow.restoreFromFile`.
+    /// Resolves the strongbox-write password first (see
+    /// `resolveStrongboxWritePassword`), then wires the completion
+    /// callback and hands off to `RestoreFlow`.
+    private func beginRestoreFromFile() {
+        resolveStrongboxWritePassword { [weak self] pw in
+            guard let self = self else { return }
+            RestoreFlow.shared.onComplete = { [weak self] in
+                guard let self = self,
+                RestoreFlow.shared.didImportAny else { return }
+                self.finishAndRouteHome()
+            }
+            RestoreFlow.shared.restoreFromFile(from: self,
+                strongboxPassword: pw)
+        }
+    }
+
+    /// Post-onboarding-safe entry into `startCloudRestore`. Resolves
+    /// the strongbox-write password first, then delegates to the
+    /// existing folder-picker + `runBatch` pipeline.
+    private func beginRestoreFromCloud() {
+        resolveStrongboxWritePassword { [weak self] pw in
+            self?.startCloudRestore(strongboxPassword: pw)
+        }
     }
 
     /// Restore-from-cloud entry. Always re-presents the folder picker
@@ -587,7 +726,26 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         let addressLabel = makeBody(L.getAddressByLangValues())
         let addressRow = makeAddressRow(address: pendingAddress)
         let balanceLabel = makeBody(L.getBalanceByLangValues())
+        // Balance row composed of a value label on the left and a
+        // refresh icon swap on the right; the swap toggles to a
+        // spinner while the balance fetch is in flight and returns to
+        // the icon when the task completes. Mirrors the in-place swap
+        // applied to every other icon-driven refresh button.
         let balanceValue = makeBody("-")
+        let refreshSwap = RefreshIconSwap(image: UIImage(named: "retry"))
+        refreshSwap.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            refreshSwap.widthAnchor.constraint(equalToConstant: 32),
+            refreshSwap.heightAnchor.constraint(equalToConstant: 32)
+        ])
+        let spacer = UIView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let balanceRow = UIStackView(arrangedSubviews: [
+            balanceValue, spacer, refreshSwap
+        ])
+        balanceRow.axis = .horizontal
+        balanceRow.alignment = .center
+        balanceRow.spacing = 8
         // Use makeNextButton for the back button so it sizes to its
         // intrinsic content and right-docks alongside Next, matching
         // Android `wrap_content + layout_gravity="right"` pill buttons.
@@ -605,10 +763,16 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
             }), for: .touchUpInside)
         [backBar, title, makeRule(), body,
             addressLabel, addressRow,
-            balanceLabel, balanceValue,
+            balanceLabel, balanceRow,
             makeRule(), wrapPrimaryRight(back, next)]
         .forEach { contentStack.addArrangedSubview($0) }
-        fetchAndShowBalance(into: balanceValue)
+        refreshSwap.onTap = { [weak self, weak balanceValue, weak refreshSwap] in
+            guard let self = self,
+                  let label = balanceValue,
+                  let swap = refreshSwap else { return }
+            self.fetchAndShowBalance(label: label, refreshSwap: swap)
+        }
+        fetchAndShowBalance(label: balanceValue, refreshSwap: refreshSwap)
     }
 
     private func renderBackupOptions() {
@@ -659,15 +823,14 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         // is fast enough to feel instant on the seed reveal step.
         Task.detached(priority: .userInitiated) { [keyType] in
             do {
-                // (notes for reviewers):
-// `createRandom` returns a
-                // `WalletEnvelope` whose `privateKey`/`publicKey`
-                // are `Data`. We do NOT use them on this path
-                // (only the address + seed words are needed for
-                // the seed-show screen) but we MUST still wipe
-                // the bytes so the only copy of the secret in
-                // process memory is the one staged for the
-                // upcoming `encryptWalletJson` call.
+// `createRandom` returns a `WalletEnvelope` whose
+                // `privateKey`/`publicKey` are `Data`. We do NOT
+                // use them on this path (only the address + seed
+                // words are needed for the seed-show screen) — the
+                // commit step re-derives the same keys from the
+                // seed via `walletFromPhrase`, deterministically.
+                // Wiping the bytes here keeps the in-process copy
+                // bounded to the seed-show step.
                 var env = try JsBridge.shared.createRandom(keyType: keyType)
                 defer {
                     env.privateKey.resetBytes(in: 0..<env.privateKey.count)
@@ -743,9 +906,25 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         let seedWords = generatedSeed
         Task.detached(priority: .userInitiated) {
             do {
-                // The bridge `encryptWalletJson` accepts a JSON
-                // `{seedWords:[...]}` payload (bridge.html line 372).
-                let walletInputJson = BackupExporter.encodeWalletInput(seedWords: seedWords)
+                // Re-derive the raw signing-key bytes from the
+                // confirmed seed phrase. The bridge's seed -> wallet
+                // derivation is deterministic so the same words
+                // yield the same address + keys; we belt-and-
+                // suspenders verify the derived address matches
+                // what the user just confirmed before committing.
+                // Holding the keys as `Data` with a `defer
+                // resetBytes` wipes them as soon as `appendWallet`
+                // returns; the only long-lived copy is the one
+                // sealed inside the strongbox by the AEAD path.
+                var env = try JsBridge.shared.walletFromPhrase(words: seedWords)
+                defer {
+                    env.privateKey.resetBytes(in: 0..<env.privateKey.count)
+                    env.publicKey.resetBytes(in: 0..<env.publicKey.count)
+                }
+                if env.address.lowercased() != address.lowercased() {
+                    throw UnlockCoordinatorV2Error.decodeFailed
+                }
+                let seedJoined = seedWords.joined(separator: ",")
                 // First-launch bootstrap vs returning-user paths:
                 // - First launch (no slot file): use the hardening's atomic
                 //   `createNewStrongboxWithInitialWallet` so the
@@ -761,19 +940,16 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
                 // password inside the coordinator and zero it on
                 // return - the strongbox key bytes never survive
                 // past the helper call.
-                let encryptedEnv = try JsBridge.shared.encryptWalletJson(
-                    walletInputJson: walletInputJson, password: password)
-                guard let enc = BackupExporter.extractEncryptedJson(encryptedEnv) else {
-                    throw UnlockCoordinatorV2Error.decodeFailed
-                }
                 let idx: Int
                 if !Strongbox.shared.isSnapshotLoaded,
                 case .noStrongbox = UnlockCoordinatorV2.bootState() {
                     let wallet = StrongboxPayload.Wallet(
                         idx: 0,
-                        address: address,
-                        encryptedSeed: enc,
-                        hasSeed: true)
+                        address: env.address,
+                        privateKey: env.privateKey,
+                        publicKey: env.publicKey,
+                        hasSeed: true,
+                        seedWords: seedJoined)
                     try UnlockCoordinatorV2.createNewStrongboxWithInitialWallet(
                         password: password,
                         initialWallet: wallet,
@@ -782,14 +958,15 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
                 } else {
                     try Self.bootstrapOrUnlock(password: password, onPhase: onPhase)
                     idx = try UnlockCoordinatorV2.appendWallet(
-                        address: address,
-                        encryptedSeed: enc,
+                        address: env.address,
+                        privateKey: env.privateKey,
+                        publicKey: env.publicKey,
                         hasSeed: true,
+                        seedWords: seedJoined,
                         password: password,
                         onPhase: onPhase)
                 }
                 await MainActor.run { [weak self] in
-                    self?.generatedWalletJson = enc
                     self?.walletIndex = idx
                     do {
                         try PrefConnect.shared.writeInt(
@@ -883,9 +1060,9 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
     /// first-time-onboarding path this short-circuits to the original
     /// behavior with no extra UI. Mirrors the Android contract: the
     /// strongbox unlock at app entry suffices, but iOS still needs the
-    /// cleartext password here to feed `bridge.encryptWalletJson` and
-    /// keep the inner-layer password equal to the strongbox password (so
-    /// later Send / Reveal flows can decrypt with that same password).
+    /// cleartext password here to seal the new wallet's raw key bytes
+    /// into the strongbox via `appendWallet` (which re-derives the
+    /// strongbox mainKey under the same password).
     private func commitGeneratedWalletWithUnlock(then: @escaping () -> Void) {
         if !chosenPassword.isEmpty {
             commitGeneratedWallet(password: chosenPassword, then: then)
@@ -957,7 +1134,6 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         button?.isEnabled = false
         Task.detached(priority: .userInitiated) { [weak self, weak button] in
             do {
-                // (notes for reviewers):
 // we only need `address` for the
                 // confirm screen, but we still must zeroize
                 // the binary key material so the ONLY surviving
@@ -984,14 +1160,15 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         }
     }
 
-    /// Final step of the restore branch: encrypt the cached
-    /// `pendingSeedWords` under the strongbox main key and commit the
-    /// returned encrypted JSON to `KeyStore`, then advance to
-    /// `.backupOptions`. We use the seed words (not a pre-built
-    /// walletJson) because `bridge.html`'s `encryptWalletJson` only
-    /// accepts `{seedWords:[...]}` or `{privateKey,publicKey}` —
-    /// `walletFromPhrase` returned only the latter, but seed words are
-    /// the canonical recovery material so prefer them.
+    /// Final step of the restore branch: derive the raw signing-
+    /// key bytes from the cached `pendingSeedWords` and commit
+    /// the wallet (raw keys + comma-joined seed) to the
+    /// strongbox via `appendWallet`, then advance to
+    /// `.backupOptions`. The seed phrase is the canonical
+    /// recovery material; the keys are deterministic from the
+    /// phrase and held in `Data` with a `defer resetBytes` so
+    /// the only long-lived copy is the one sealed inside the
+    /// strongbox by the AEAD path.
     private func persistPendingWallet(password: String) {
         // Idempotency guard. The historical shape ran the
         // encrypt + bootstrap + appendWallet pipeline every
@@ -1036,26 +1213,35 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         generatedSeed = seedWords
         Task.detached(priority: .userInitiated) {
             do {
-                let walletInputJson = BackupExporter.encodeWalletInput(seedWords: seedWords)
-                // Same atomic-bootstrap rationale as
-                // `commitGeneratedWallet`: on a fresh install
-                // (.noStrongbox) we use the hardening's atomic
-                // createNewStrongboxWithInitialWallet so a power-
-                // cut never leaves an empty-wallet strongbox the
-                // user has trusted as saved. Closes the durability gap.
-                let encEnv = try JsBridge.shared.encryptWalletJson(
-                    walletInputJson: walletInputJson, password: password)
-                guard let enc = BackupExporter.extractEncryptedJson(encEnv) else {
+                // Re-derive the raw keys from the seed words.
+                // Deterministic so we belt-and-suspenders compare
+                // the derived address to the one the user just
+                // confirmed in the previous step. Same atomic-
+                // bootstrap rationale as `commitGeneratedWallet`:
+                // on a fresh install (.noStrongbox) we use the
+                // hardening's atomic
+                // `createNewStrongboxWithInitialWallet` so a
+                // power-cut never leaves an empty-wallet
+                // strongbox the user has trusted as saved.
+                var env = try JsBridge.shared.walletFromPhrase(words: seedWords)
+                defer {
+                    env.privateKey.resetBytes(in: 0..<env.privateKey.count)
+                    env.publicKey.resetBytes(in: 0..<env.publicKey.count)
+                }
+                if env.address.lowercased() != address.lowercased() {
                     throw UnlockCoordinatorV2Error.decodeFailed
                 }
+                let seedJoined = seedWords.joined(separator: ",")
                 let idx: Int
                 if !Strongbox.shared.isSnapshotLoaded,
                 case .noStrongbox = UnlockCoordinatorV2.bootState() {
                     let wallet = StrongboxPayload.Wallet(
                         idx: 0,
-                        address: address,
-                        encryptedSeed: enc,
-                        hasSeed: true)
+                        address: env.address,
+                        privateKey: env.privateKey,
+                        publicKey: env.publicKey,
+                        hasSeed: true,
+                        seedWords: seedJoined)
                     try UnlockCoordinatorV2.createNewStrongboxWithInitialWallet(
                         password: password,
                         initialWallet: wallet,
@@ -1064,14 +1250,15 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
                 } else {
                     try Self.bootstrapOrUnlock(password: password, onPhase: onPhase)
                     idx = try UnlockCoordinatorV2.appendWallet(
-                        address: address,
-                        encryptedSeed: enc,
+                        address: env.address,
+                        privateKey: env.privateKey,
+                        publicKey: env.publicKey,
                         hasSeed: true,
+                        seedWords: seedJoined,
                         password: password,
                         onPhase: onPhase)
                 }
                 await MainActor.run { [weak self] in
-                    self?.generatedWalletJson = enc
                     self?.generatedAddress = address
                     self?.walletIndex = idx
                     do {
@@ -1198,9 +1385,14 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         // During fresh wallet creation `generatedSeed` is populated by
         // `generateSeedWords` / `persistPendingWallet` and survives
         // through to this point, so we can hand it directly to the
-        // shared exporter without re-decrypting.
+        // shared exporter without re-decrypting. Onboarding only ever
+        // reaches this surface with a freshly-generated seed phrase,
+        // so the `.seedWords` branch is always correct here - the
+        // key-only branch is exercised exclusively from
+        // `BackupOptionsViewController` for wallets imported via
+        // `walletFromKeys` that never had a recoverable phrase.
         BackupExporter.reencryptAndExport(
-            seed: generatedSeed,
+            payload: .seedWords(generatedSeed),
             address: generatedAddress,
             backupPassword: password,
             target: target,
@@ -1313,6 +1505,16 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
                 case .tooManyAttempts(let s):
                 return UnlockAttemptLimiter.userFacingLockoutMessage(
                     remainingSeconds: s)
+                case .tamperDetected:
+                // Surface the friendly "reinstall to clear" copy
+                // instead of the developer-facing
+                // `UnlockCoordinatorV2: tamper detected (...)`
+                // description. The user has no recovery path other
+                // than reinstalling the app to wipe the unreadable
+                // slot files; the localized string spells that out
+                // without leaking the implementation detail of
+                // which slot failed which check.
+                return Localization.shared.getWalletDataUnreadableByErrors()
                 default:
                 break
             }
@@ -1716,21 +1918,30 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         return container
     }
 
-    /// Populate the Confirm-Wallet balance label. Mirrors Android's
-    /// `getBalanceByAccount` -> `CoinUtils.formatWei` so a freshly
-    /// restored, funded wallet displays a human-readable amount
-    /// instead of the raw wei integer the API returns.
-    private func fetchAndShowBalance(into label: UILabel) {
+    /// Populate the Confirm-Wallet balance label and swap the
+    /// adjacent refresh icon for a spinner for the duration of the
+    /// fetch. Mirrors Android's `getBalanceByAccount` ->
+    /// `CoinUtils.formatWei` so a freshly restored, funded wallet
+    /// displays a human-readable amount instead of the raw wei
+    /// integer the API returns. `pendingAddress` is captured at
+    /// dispatch time so a mid-flow network swap does not surprise
+    /// the user by retargeting an in-flight fetch.
+    private func fetchAndShowBalance(label: UILabel,
+                                     refreshSwap: RefreshIconSwap) {
         let addr = pendingAddress
-        guard !addr.isEmpty else { label.text = "-"; return }
-        label.text = CoinUtils.formatWei("0")
+        guard !addr.isEmpty else {
+            label.text = CoinUtils.UNKNOWN_BALANCE_PLACEHOLDER
+            return
+        }
+        refreshSwap.setLoading(true)
         Task { @MainActor in
             do {
                 let resp = try await AccountsApi.accountBalance(address: addr)
                 label.text = CoinUtils.formatWei(resp.result?.balance)
             } catch {
-                label.text = "-"
+                label.text = CoinUtils.UNKNOWN_BALANCE_PLACEHOLDER
             }
+            refreshSwap.setLoading(false)
         }
     }
 
@@ -1832,12 +2043,11 @@ public final class SeedChipGrid: UIView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    /// (notes for reviewers):
     /// BIP39 seed words must NOT be exposed to VoiceOver as
     /// individual chip labels. A user with VoiceOver
     /// enabled in a public space would otherwise have each seed
     /// word read out loud the moment focus walks the grid.
-    /// (notes for reviewers): ///retraction of prior position): the previous rationale
+    /// Retraction of prior position: the previous rationale
     /// exempted editable mode from VoiceOver suppression
     /// on the argument that "the user already knows what they
     /// typed". That rationale is now retracted. The threat is not
@@ -2133,7 +2343,6 @@ extension SeedChipGrid: UITextFieldDelegate {
 
 /// Tiny `UIView` whose `layer.borderColor` tracks an asset-catalog
 /// `UIColor` across trait-collection (light / dark) changes.
-///
 /// `CALayer.borderColor` stores a raw `CGColor`, which is a snapshot
 /// of whatever the resolving trait collection produced at assignment
 /// time and does NOT update when the user toggles dark mode at

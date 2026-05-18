@@ -162,8 +162,25 @@ targets:
             UTTypeConformsTo: ["public.data"]
             UTTypeTagSpecification:
               "public.filename-extension": ["wallet"]
+        # TLS 1.3 minimum on every in-process project-owned host.
+        # Applies to both `URLSession` (the scan API) and the
+        # WKWebView JsonRpcProvider (the bundled MAINNET RPC).
+        # `quantumscan.com` is intentionally absent: block-explorer
+        # URLs are opened via `UIApplication.open(...)`, which hands
+        # off to Safari outside our process; iOS app-side ATS has
+        # no effect on that handshake. User-defined custom RPC
+        # hostnames are unknown at build time and fall through to
+        # the platform ATS default (TLS 1.2 minimum) — matches the
+        # Android sibling's WebView limitation.
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: false
+          NSExceptionDomains:
+            app.readrelay.quantumcoinapi.com:
+              NSExceptionMinimumTLSVersion: "TLSv1.3"
+              NSIncludesSubdomains: false
+            public.rpc.quantumcoinapi.com:
+              NSExceptionMinimumTLSVersion: "TLSv1.3"
+              NSIncludesSubdomains: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.quantumcoin.wallet

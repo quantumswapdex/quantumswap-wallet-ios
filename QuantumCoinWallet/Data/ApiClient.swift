@@ -92,10 +92,39 @@ public final class ApiClient: @unchecked Sendable {
         cfg.timeoutIntervalForRequest = 30
         cfg.timeoutIntervalForResource = 60
         cfg.waitsForConnectivity = false
+        // TLS-version floor for every host this session ever talks
+        // to. Refuses sub-TLS-1.3 handshakes; a server that only
+        // speaks TLS 1.2 fails with an `errSSLPeerProtocolVersion`
+        // / `URLError.secureConnectionFailed` at connect time
+        // rather than silently downgrading. iOS 13 introduced the
+        // `tls_protocol_version_t` enum used here; the project's
+        // deployment target is iOS 15, so no `#available` guard is
+        // needed.
+        //
+        // `tlsMaximumSupportedProtocolVersion` is deliberately left
+        // at its default sentinel so a future TLS 1.4 (or any
+        // future TLS 1.3 profile Apple ships) can be negotiated
+        // transparently. We also intentionally do NOT call any
+        // cipher-suite restriction API: cipher curation is the
+        // system's job, and freezing the suite list here would
+        // risk excluding future PQC-bundled AEADs. Cipher suites
+        // are decoupled from key exchange in TLS 1.3, so the PQ
+        // hybrid group `X25519MLKEM768` (FIPS 203 ML-KEM-768 +
+        // X25519) is negotiated independently by the OS whenever
+        // both peers advertise it; nothing on this client either
+        // enables or inhibits that negotiation. Sibling reference:
+        // Android `TlsPinning.java`'s `TLS_1_3_ONLY` ConnectionSpec.
+        cfg.tlsMinimumSupportedProtocolVersion = .TLSv13
         self.session = URLSession(configuration: cfg,
             delegate: pinningDelegate,
             delegateQueue: nil)
     }
+
+    /// Test-only accessor for the configured `URLSession`. Lets
+    /// `SecurityFixesTests` assert the TLS-version floor without
+    /// going through reflection. NOT for production use; the
+    /// session is otherwise reachable only via `get(...)`.
+    internal var urlSessionForTests: URLSession { session }
 
     public func get<T: Decodable>(path: String, as type: T.Type) async throws -> T {
         let trimmedBase = basePath.hasSuffix("/") ? String(basePath.dropLast()) : basePath
@@ -162,7 +191,6 @@ public final class ApiClient: @unchecked Sendable {
 }
 
 // MARK: - AccountsApi
-// (notes for reviewers):
 // every public method here takes an `address` argument
 // and uses it as a URL path segment. The address is supposed to be
 // the wallet's own address (which goes through validation in the

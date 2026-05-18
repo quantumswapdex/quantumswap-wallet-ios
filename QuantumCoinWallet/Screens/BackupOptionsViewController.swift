@@ -8,7 +8,8 @@
 // Mechanics match the first-time pipeline through `BackupExporter`:
 // 1. (Cloud only) show the cloud-backup info dialog.
 // 2. `UnlockDialogViewController` -> validate the strongbox password.
-// 3. `Strongbox.encryptedSeed(at:)` + `JsBridge.decryptWalletJson`
+// 3. `Strongbox.seedWords(at:)` (raw seed phrase straight from
+//    the unlocked snapshot — no per-wallet envelope to unwrap)
 // to recover the seed phrase for the chosen wallet.
 // 4. `BackupPasswordDialog` -> collect a fresh backup password.
 // 5. `BackupExporter.reencryptAndExport` -> re-encrypt under the new
@@ -138,23 +139,55 @@ HomeScreenViewTypeProviding {
             dlg.present(wait, animated: true)
             let walletIndex = self.walletIndex
             Task.detached(priority: .userInitiated) { [weak self, weak dlg, weak wait] in
-                var result: Result<(seed: [String], address: String), Error> =
+                var result: Result<(payload: BackupExportPayload, address: String), Error> =
                 .failure(UnlockCoordinatorV2Error.decodeFailed)
                 do {
+                    // Unlock (or re-verify) under the user's
+                    // password — re-derives mainKey, applies
+                    // session, and routes failures through the
+                    // shared `UnlockAttemptLimiter`. Once it
+                    // returns, the wallet's raw recovery material
+                    // is available directly from the unlocked
+                    // snapshot; no nested per-wallet envelope to
+                    // unwrap.
                     try UnlockCoordinatorV2.unlockWithPasswordAndApplySession(strongboxPassword)
-                    guard let encryptedJson = Strongbox.shared.encryptedSeed(at: walletIndex) else {
-                        throw UnlockCoordinatorV2Error.decodeFailed
-                    }
-                    var env = try JsBridge.shared.decryptWalletJson(
-                        walletJson: encryptedJson, password: strongboxPassword)
-                    let seedWords = env.seedWords ?? []
-                    env.privateKey.resetBytes(in: 0..<env.privateKey.count)
-                    env.publicKey.resetBytes(in: 0..<env.publicKey.count)
-                    guard !seedWords.isEmpty else {
-                        throw UnlockCoordinatorV2Error.decodeFailed
-                    }
                     let address = Strongbox.shared.address(forIndex: walletIndex) ?? ""
-                    result = .success((seedWords, address))
+                    // Mirror Android `CloudBackupManager.encryptWallet`:
+                    // wallets that carry a recoverable BIP39 phrase
+                    // export via the seed-words branch; key-only
+                    // wallets (`hasSeed == false`, imported via
+                    // `walletFromKeys`) export via the
+                    // private/public-key bytes branch. The pre-
+                    // existing iOS shape conflated "no seed" with
+                    // "wrong password" and threw `decodeFailed` here,
+                    // which the catch surfaced as the orange
+                    // wallet-password-mismatch alert even though
+                    // the strongbox had just unlocked under the
+                    // user's correct password.
+                    let exportPayload: BackupExportPayload
+                    if Strongbox.shared.hasSeed(at: walletIndex) == true,
+                    let seedJoined = Strongbox.shared.seedWords(at: walletIndex),
+                    !seedJoined.isEmpty {
+                        let words = seedJoined.split(separator: ",").map(String.init)
+                        guard !words.isEmpty else {
+                            throw UnlockCoordinatorV2Error.decodeFailed
+                        }
+                        exportPayload = .seedWords(words)
+                    } else if let priv = Strongbox.shared.privateKey(at: walletIndex),
+                    let pub = Strongbox.shared.publicKey(at: walletIndex),
+                    !priv.isEmpty, !pub.isEmpty {
+                        exportPayload = .keys(privateKey: priv, publicKey: pub)
+                    } else {
+                        // Snapshot loaded but neither seed nor raw
+                        // keys are present at this slot - the
+                        // strongbox payload is malformed. Keep the
+                        // historical `decodeFailed` so the catch
+                        // routes through the wallet-password-mismatch
+                        // alert; this branch is unreachable under
+                        // the strongbox write invariants.
+                        throw UnlockCoordinatorV2Error.decodeFailed
+                    }
+                    result = .success((exportPayload, address))
                 } catch {
                     result = .failure(error)
                 }
@@ -166,7 +199,7 @@ HomeScreenViewTypeProviding {
                             dlg?.dismiss(animated: true) {
                                 self?.promptBackupPasswordAndExport(
                                     target: target,
-                                    seed: payload.seed,
+                                    payload: payload.payload,
                                     address: payload.address)
                             }
                             case .failure(let err):
@@ -197,9 +230,12 @@ HomeScreenViewTypeProviding {
 
     /// Step 2 of the export pipeline: collect the user's chosen backup
     /// password, then delegate to `BackupExporter` for the re-encrypt
-    /// + cloud-folder / share-sheet hand-off.
+    /// + cloud-folder / share-sheet hand-off. `payload` carries either
+    /// the seed phrase (`.seedWords`) or the raw signing-key bytes
+    /// (`.keys`) - the exporter picks the matching `bridge.html`
+    /// branch.
     private func promptBackupPasswordAndExport(target: BackupTarget,
-        seed: [String],
+        payload: BackupExportPayload,
         address: String) {
         // Pass `address` so the dialog's hidden `.username` field
         // can scope the iOS Keychain Save prompt to a per-wallet
@@ -212,7 +248,7 @@ HomeScreenViewTypeProviding {
             dlg?.dismiss(animated: true) { [weak self] in
                 guard let self = self else { return }
                 BackupExporter.reencryptAndExport(
-                    seed: seed,
+                    payload: payload,
                     address: address,
                     backupPassword: backupPwd,
                     target: target,

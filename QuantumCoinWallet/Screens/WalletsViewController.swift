@@ -283,10 +283,14 @@ HomeScreenViewTypeProviding {
         )
         // The has-seed bit lives on the encrypted wallet record
         // (`StrongboxPayload.Wallet.hasSeed`); pre-unlock the
-        // snapshot is empty so we default to `true` and let the
-        // strongbox refresh post-unlock hide the reveal tile if
-        // the wallet was imported as a private-key-only backup.
-        let hasSeed = Strongbox.shared.wallet(at: index)?.hasSeed ?? true
+        // snapshot is empty so we default to `false` (hide the
+        // reveal tile until the strongbox refresh post-unlock
+        // gives us the authoritative flag). Defaulting to true
+        // would briefly route a key-only-imported wallet to a
+        // reveal flow that shows an empty seed phrase before
+        // the snapshot lands; safer to under-show and let the
+        // post-unlock refresh expose the tile.
+        let hasSeed = Strongbox.shared.wallet(at: index)?.hasSeed ?? false
         revealTile.isHidden = !hasSeed
         let revealCell = makeColumnContainer(content: revealTile)
 
@@ -445,11 +449,13 @@ HomeScreenViewTypeProviding {
         }
     }
 
-    /// Reveal flow runs `unlockWithPasswordAndApplySession` (scrypt)
-    /// followed by `JsBridge.decryptWalletJson` (a second scrypt round inside the
-    /// JS bridge). Both can take a few seconds, so a
-    /// `WaitDialogViewController` is presented over the unlock dialog
-    /// while the work runs - mirroring the pattern used by
+    /// Reveal flow runs `unlockWithPasswordAndApplySession` (scrypt
+    /// + AEAD-open of the strongbox) and then reads the wallet's
+    /// raw seed phrase straight from the unlocked snapshot — there
+    /// is no nested per-wallet envelope to unwrap. The unlock can
+    /// take a few seconds, so a `WaitDialogViewController` is
+    /// presented over the unlock dialog while the work runs,
+    /// mirroring the pattern used by
     /// `BackupOptionsViewController.runBackupFlow` and
     /// `HomeWalletViewController.presentUnlockThen`. Wrong strongbox
     /// password leaves the unlock dialog up with the standard inline
@@ -466,24 +472,20 @@ HomeScreenViewTypeProviding {
                 message: Localization.shared.getWaitWalletOpenByLangValues())
             dlg.present(wait, animated: true)
             Task.detached(priority: .userInitiated) { [weak self, weak dlg, weak wait] in
-                // (notes for reviewers):
-// the reveal flow only needs
-                // the seed words; we wipe the binary key
-                // material as soon as `decryptWalletJson`
-                // returns, so the only surviving secret in
-                // process memory is the user-readable mnemonic
-                // (which the next screen displays anyway).
+                // the reveal flow only needs the seed words; the
+                // post-v2 strongbox snapshot exposes them directly
+                // via `Strongbox.seedWords(at:)` once the unlock
+                // succeeds. The strongbox AEAD is the only
+                // encryption layer over the seed material, so no
+                // second per-wallet decrypt is needed.
                 var result: Result<[String], Error> = .failure(UnlockCoordinatorV2Error.decodeFailed)
                 do {
                     try UnlockCoordinatorV2.unlockWithPasswordAndApplySession(pw)
-                    guard let encrypted = Strongbox.shared.encryptedSeed(at: index) else {
+                    guard let seedJoined = Strongbox.shared.seedWords(at: index),
+                    !seedJoined.isEmpty else {
                         throw UnlockCoordinatorV2Error.decodeFailed
                     }
-                    var env = try JsBridge.shared.decryptWalletJson(
-                        walletJson: encrypted, password: pw)
-                    let words = env.seedWords ?? []
-                    env.privateKey.resetBytes(in: 0..<env.privateKey.count)
-                    env.publicKey.resetBytes(in: 0..<env.publicKey.count)
+                    let words = seedJoined.split(separator: ",").map(String.init)
                     result = .success(words)
                 } catch {
                     result = .failure(error)

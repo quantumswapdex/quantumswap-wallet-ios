@@ -1,10 +1,19 @@
 // StrongboxFileCodec.swift (Schema layer 2)
-// V2 strongbox file codec: JSON shape, file-level MAC compute /
+// V3 strongbox file codec: JSON shape, file-level MAC compute /
 // verify, two-slot read selector, encode + write coordinator.
+// v=3 is the cross-platform-portable schema; it differs from
+// the iOS-only v=2 in: (a) inner-payload `checksum` is a keyed
+// HMAC under "strongbox-payload-checksum-v3" rather than an
+// unkeyed SHA-256, (b) the inner payload includes a
+// `secureItems` map for cross-platform parity with Android,
+// (c) the scrypt salt is 32 bytes (was 16). The on-disk file-
+// level envelope (kdf / wrap / strongbox / mac / uiBlockHash /
+// ui) is unchanged byte-for-byte from v=2 except for the `v`
+// field bump and the larger `kdf.salt` value.
 // Closes `` (rename top-level fields), `` (file-level
 // MAC + rollback detection), and the schema half of ``
 // (Strongbox accessor).
-// Why this exists (notes for reviewers):
+// Why this exists:
 // This is the *only* file in the wallet that knows the v2
 // slot-file JSON shape. Every other layer either:
 // * Layer 1 sees only opaque bytes (`AtomicSlotWriter`).
@@ -24,15 +33,14 @@
 // "generation": <Int>,
 // "kdf": {
 // "algorithm": "scrypt",
-// "salt": "<base64, 16 bytes>",
+// "salt": "<base64, 32 bytes>",
 // "params": { "N": ..., "r": ..., "p": ..., "keyLen": ... }
 // },
 // "wrap": {
-// "passwordWrap": <Aead envelope>,
-// "keychainWrap": <Aead envelope, optional>
+// "passwordWrap": <Aead envelope>
 // },
 // "strongbox": <Aead envelope wrapping a StrongboxPayload padded to
-// exactly 32 KiB>,
+// exactly StrongboxPadding.bucketSize (4 MiB)>,
 // "uiBlockHash": "<base64, 32 bytes>", // SHA-256 of canonical(ui)
 // "mac": "<base64, 32 bytes>",
 // "ui": { /* opt-in non-secret prefs */ }
@@ -47,7 +55,6 @@
 // files' `ui` blocks - or replaces one slot's `ui` block
 // with attacker-chosen contents - cannot re-bind it under
 // the original MAC.
-// (notes for reviewers):
 // the empty-ui case hashes the canonical bytes `{}`
 // (`JSONSerialization.data(withJSONObject: [:],
 // options: [.sortedKeys])`), giving a single well-defined
@@ -98,7 +105,15 @@ import CryptoKit
 
 public enum StrongboxFileCodec {
 
-    public static let schemaVersion: Int = 2
+    public static let schemaVersion: Int = 3
+    /// HKDF info label for the file-level MAC key derivation.
+    /// Intentionally retains the historical "integrity-v2"
+    /// label even though the outer schema is bumped to v=3 —
+    /// the file-MAC derivation is byte-identical to v=2 and
+    /// re-using the label keeps the cross-platform vector
+    /// suite focused on the parts that actually changed
+    /// (inner checksum, secureItems, salt size). Android's
+    /// `MacUtil.INTEGRITY_INFO_LABEL` mirrors this constant.
     public static let macInfoLabel: String = "integrity-v2"
     public static let macKeyByteCount: Int = 32
 
@@ -133,16 +148,16 @@ public enum StrongboxFileCodec {
     /// hands the cleartext to layer 5.
     public struct DecodedFile: @unchecked Sendable {
         public let v: Int
+        /// Monotonic generation counter. Width-matched to Android
+        /// `long` (signed 64-bit). On every supported iOS device
+        /// `Int` is itself a signed 64-bit integer so the wire format
+        /// on disk is byte-identical to Android's `long`; the type
+        /// alias `Int64` is offered below for any caller that needs
+        /// to make the cross-platform width explicit.
         public let generation: Int
         public let kdfSalt: Data
         public let kdfParams: KdfParams
         public let passwordWrap: AeadEnvelope
-        /// Retained as `Optional` for forward read-compat with
-        /// old slot files that still carry a
-        /// non-nil value. New writes always pass nil; the
-        /// per-device wrap-key infrastructure was deleted with
-        /// the never-shipped biometric unlock UI.
-        public let keychainWrap: AeadEnvelope?
         public let strongbox: AeadEnvelope
         /// SHA-256 of the on-disk canonical `ui` block. Bound
         /// by the file-level MAC so a tampered `ui` block fails
@@ -174,7 +189,7 @@ public enum StrongboxFileCodec {
         /// schema accepts ONLY this exact string today; an
         /// unknown / typo'd value is rejected at decode time
         /// with `Error.malformedJson("envelope.alg=...")`.
-        /// (notes for reviewers):/// centralising the literal here closes the
+        /// Centralising the literal here closes the
         /// "two writers disagree on the spelling" failure mode
         /// (the historical `AES-GC` typo in
         /// `UnlockCoordinatorV2.sealToEnvelope`). A future
@@ -289,7 +304,6 @@ public enum StrongboxFileCodec {
     /// Encode the supplied component values into the v2 JSON
     /// shape, compute the file-level MAC, and durably commit the
     /// resulting bytes to the inactive slot.
-    /// (notes for reviewers):
     /// the `ui` block hashes into `uiBlockHash` inside the MAC
     /// scope so an attacker cannot swap two slots' `ui` blocks
     /// - or replace one slot's `ui` block with attacker-chosen
@@ -342,7 +356,6 @@ public enum StrongboxFileCodec {
         kdfSalt: Data,
         kdfParams: KdfParams,
         passwordWrap: AeadEnvelope,
-        keychainWrap: AeadEnvelope?,
         strongbox: AeadEnvelope,
         macKey: Data,
         mainKey: Data,
@@ -357,7 +370,6 @@ public enum StrongboxFileCodec {
             kdfSalt: kdfSalt,
             kdfParams: kdfParams,
             passwordWrap: passwordWrap,
-            keychainWrap: keychainWrap,
             strongbox: strongbox,
             uiBlockHash: uiHash)
 
@@ -377,7 +389,7 @@ public enum StrongboxFileCodec {
         // canonicalisation is the same as the seal path used
         // (sortedKeys JSONEncoder), so byte-equal == deep-equal.
         let payloadEncoder = JSONEncoder()
-        payloadEncoder.outputFormatting = [.sortedKeys]
+        payloadEncoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let expectedCanonical = try payloadEncoder.encode(expectedPayload)
 
         try writerQueue.sync {
@@ -411,7 +423,7 @@ public enum StrongboxFileCodec {
     ///   D. AEAD-open the strongbox envelope with the same `mainKey`
     ///      we just sealed under. Failure => seal/open asymmetry or
     ///      ciphertext drift.
-    ///   E. Strip the 32 KiB fixed padding. Failure => padding scheme
+    ///   E. Strip the fixed 4 MiB padding. Failure => padding scheme
     ///      drifted (pad and unpad disagree on the 0x80 marker, or
     ///      the bucket size changed between calls).
     ///   F. JSON-decode into a typed `StrongboxPayload`. Failure =>
@@ -456,7 +468,7 @@ public enum StrongboxFileCodec {
                 "verify: strongbox aead open failed: \(error)")
         }
 
-        // Step E: strip 32 KiB fixed padding.
+        // Step E: strip fixed 4 MiB padding.
         let plaintext: Data
         do {
             plaintext = try StrongboxPadding.unpad(paddedPlaintext)
@@ -468,15 +480,22 @@ public enum StrongboxFileCodec {
         // Step F: JSON-decode into typed StrongboxPayload.
         let decoded: StrongboxPayload
         do {
-            decoded = try JSONDecoder().decode(
+            // Strongbox decode must NOT rewrite `scanApiDomain` /
+            // `blockExplorerDomain` through `ensureHttps`; doing so
+            // mutates the bytes the user (or Android) originally
+            // wrote and breaks byte parity on the next persist.
+            let strongboxDecoder = JSONDecoder()
+            strongboxDecoder.userInfo[.blockchainNetworkRewriteUrls] = false
+            decoded = try strongboxDecoder.decode(
                 StrongboxPayload.self, from: plaintext)
         } catch {
             throw Error.malformedJson(
                 "verify: payload decode failed: \(error)")
         }
 
-        // Step G: inner checksum verify.
-        guard Strongbox.verifyChecksum(of: decoded) else {
+        // Step G: inner checksum verify (keyed HMAC under
+        // HKDF(mainKey, salt=nil, "strongbox-payload-checksum-v3")).
+        guard Strongbox.verifyChecksum(of: decoded, mainKey: mainKey) else {
             throw Error.malformedJson(
                 "verify: payload checksum mismatch")
         }
@@ -500,7 +519,6 @@ public enum StrongboxFileCodec {
     /// SHA-256 of the canonical (sortedKeys) JSON of the ui
     /// block. The empty case hashes `{}`. This is the value
     /// stored in `uiBlockHash` and bound by the file-level MAC.
-    /// (notes for reviewers):
     /// callers MUST use this helper rather than re-implementing
     /// the canonicalisation - an inconsistency in how the ui
     /// block is normalised before hashing would let an attacker
@@ -557,7 +575,12 @@ public enum StrongboxFileCodec {
         return decoded
     }
 
-    private static func decodeOnly(_ bytes: Data) throws -> DecodedFile {
+    /// `internal` (not `private`) so the unit-test suite in
+    /// `StrongboxLayerTests.swift` can construct a malicious slot
+    /// JSON and assert it is rejected at decode time. Production
+    /// callers continue to reach the codec through `readCandidates`
+    /// / `readWinner`, both of which delegate here.
+    static func decodeOnly(_ bytes: Data) throws -> DecodedFile {
         guard let raw = try? JSONSerialization.jsonObject(with: bytes),
         let obj = raw as? [String: Any]
         else {
@@ -568,9 +591,15 @@ public enum StrongboxFileCodec {
         guard v == schemaVersion else {
             throw Error.schemaVersionMismatch(found: v)
         }
-        guard let generation = obj["generation"] as? Int else {
+        // Decode as NSNumber so the value round-trips through every
+        // JSON-decoded integer shape (Int, Int64, Double-with-no-
+        // fraction). Android writes `long`; on 64-bit iOS `Int` is
+        // itself 64 bits, so reading through `intValue` preserves
+        // the full Android `long` range without truncation.
+        guard let generationNumber = obj["generation"] as? NSNumber else {
             throw Error.missingField("generation")
         }
+        let generation: Int = generationNumber.intValue
         guard let kdf = obj["kdf"] as? [String: Any] else {
             throw Error.missingField("kdf")
         }
@@ -584,6 +613,25 @@ public enum StrongboxFileCodec {
         let keyLen = params["keyLen"] as? Int
         else { throw Error.missingField("kdf.params") }
 
+        // Reject any slot whose advertised KDF parameters are
+        // weaker than the documented v=3 defaults. Without this
+        // guard, an attacker who can place a slot file (e.g., a
+        // malicious iCloud Drive replay or a crafted import) could
+        // craft a v=3 envelope with N=1024 and the user's known
+        // password; the slot's MAC would still verify under those
+        // weakened params (the MAC key is
+        // HKDF(mainKey, salt, "integrity-v2") and `mainKey` is the
+        // scrypt output), so the only thing standing between a
+        // brute-forceable slot and unlock is this min-bound check.
+        // Mirrored on Android at `StrongboxFileCodec.java`.
+        if N < JsBridge.SCRYPT_N || r < JsBridge.SCRYPT_R
+            || p < JsBridge.SCRYPT_P || keyLen < JsBridge.SCRYPT_KEY_LEN {
+            throw Error.malformedJson(
+                "kdf.params below documented minimum (got N=\(N),r=\(r),p=\(p),keyLen=\(keyLen) "
+                + "expected>=N=\(JsBridge.SCRYPT_N),r=\(JsBridge.SCRYPT_R),"
+                + "p=\(JsBridge.SCRYPT_P),keyLen=\(JsBridge.SCRYPT_KEY_LEN))")
+        }
+
         guard let wrap = obj["wrap"] as? [String: Any] else {
             throw Error.missingField("wrap")
         }
@@ -591,11 +639,18 @@ public enum StrongboxFileCodec {
         let passwordWrap = decodeEnvelope(passwordObj)
         else { throw Error.missingField("wrap.passwordWrap") }
 
-        let keychainWrap: AeadEnvelope?
-        if let kwObj = wrap["keychainWrap"] as? [String: Any] {
-            keychainWrap = decodeEnvelope(kwObj)
-        } else {
-            keychainWrap = nil
+        // Clean-slate v3 format: `wrap` must contain exactly
+        // `passwordWrap`. The previously-tolerated iOS-only
+        // `keychainWrap` field is rejected so iOS-written and
+        // Android-written slots are byte-identical at the wrap
+        // layer (Android never emits `keychainWrap`, and its MAC
+        // recompute path only covers `passwordWrap`). Biometric
+        // unlock now lives in a sibling sidecar file rather than
+        // inside the slot envelope.
+        let extraneousWrapKeys = wrap.keys.filter { $0 != "passwordWrap" }.sorted()
+        guard extraneousWrapKeys.isEmpty else {
+            throw Error.malformedJson(
+                "wrap must contain only passwordWrap; rejected unexpected key(s): \(extraneousWrapKeys.joined(separator: ", "))")
         }
 
         guard let strongboxObj = obj["strongbox"] as? [String: Any],
@@ -606,7 +661,6 @@ public enum StrongboxFileCodec {
         let mac = Data(base64Encoded: macB64)
         else { throw Error.missingField("mac") }
 
-        // (notes for reviewers):
 // the on-disk `uiBlockHash` MUST match the
         // SHA-256 of the canonical on-disk `ui` block. A
         // mismatch means the `ui` block was tampered (someone
@@ -634,7 +688,6 @@ public enum StrongboxFileCodec {
             kdfSalt: salt,
             kdfParams: KdfParams(N: N, r: r, p: p, keyLen: keyLen),
             passwordWrap: passwordWrap,
-            keychainWrap: keychainWrap,
             strongbox: strongbox,
             uiBlockHash: uiHash)
         let macInput = try canonicalize(mainObj)
@@ -645,7 +698,6 @@ public enum StrongboxFileCodec {
             kdfSalt: salt,
             kdfParams: KdfParams(N: N, r: r, p: p, keyLen: keyLen),
             passwordWrap: passwordWrap,
-            keychainWrap: keychainWrap,
             strongbox: strongbox,
             uiBlockHash: uiHash,
             uiBlock: uiObj,
@@ -662,7 +714,6 @@ public enum StrongboxFileCodec {
         let ct = Data(base64Encoded: ctB64),
         let tag = Data(base64Encoded: tagB64)
         else { return nil }
-        // (notes for reviewers):
 // strict `alg` validation closes the
         // historical `AES-GC` typo path. That typo in
         // `sealToEnvelope`
@@ -696,16 +747,17 @@ public enum StrongboxFileCodec {
         kdfSalt: Data,
         kdfParams: KdfParams,
         passwordWrap: AeadEnvelope,
-        keychainWrap: AeadEnvelope?,
         strongbox: AeadEnvelope,
         uiBlockHash: Data
     ) -> [String: Any] {
-        var wrap: [String: Any] = [
+        // `wrap` contains exactly `passwordWrap` so iOS- and
+        // Android-written slot files are byte-identical at this
+        // layer. Biometric unlock state, if reintroduced, will
+        // live in a sibling sidecar file rather than inside the
+        // strongbox slot envelope.
+        let wrap: [String: Any] = [
             "passwordWrap": encodeEnvelope(passwordWrap)
         ]
-        if let kw = keychainWrap {
-            wrap["keychainWrap"] = encodeEnvelope(kw)
-        }
         return [
             "v": schemaVersion,
             "generation": generation,
@@ -792,7 +844,6 @@ public enum StrongboxFileCodec {
                 kdfSalt: decoded.kdfSalt,
                 kdfParams: decoded.kdfParams,
                 passwordWrap: decoded.passwordWrap,
-                keychainWrap: decoded.keychainWrap,
                 strongbox: decoded.strongbox,
                 uiBlockHash: decoded.uiBlockHash)
             fullObj["mac"] = decoded.mac.base64EncodedString()
@@ -825,7 +876,7 @@ public enum StrongboxFileCodec {
                 // compare adds here is "and the journey from RAM
                 // through the page cache to flash didn't mutate a
                 // bit". The marginal cost is one Data == Data over
-                // up to ~32 KiB; the marginal value is preventing
+                // up to ~4 MiB; the marginal value is preventing
                 // a silent NAND bit-flip in the missing slot from
                 // becoming the user's only on-disk copy after the
                 // surviving slot fails on the next read.
@@ -856,7 +907,6 @@ public enum StrongboxFileCodec {
     /// `scheduleReMirror` makes the race a code-level
     /// impossibility rather than a "we hope the OS scheduler
     /// gets it right".
-    /// (notes for reviewers):
     /// `writeNewGeneration` itself is called from the unlock-
     /// critical path and runs synchronously on the caller's
     /// queue (typically the background actor that is doing

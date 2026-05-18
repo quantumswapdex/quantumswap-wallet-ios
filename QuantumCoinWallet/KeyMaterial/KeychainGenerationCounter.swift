@@ -1,7 +1,7 @@
 // KeychainGenerationCounter.swift (KeyMaterial layer)
 // Per-device monotonic anti-rollback counter for the strongbox
 // slot-file generation.
-// Why this exists (notes for reviewers):
+// Why this exists:
 // The strongbox file-level MAC covers `{v, generation, kdf,
 // wrap, strongbox}`, so an attacker cannot mutate the
 // `generation` field of an INDIVIDUAL slot without breaking
@@ -91,7 +91,6 @@ public enum KeychainGenerationCounter {
     /// has ever been written on this device. Nil is the
     /// canonical "fresh device / cross-device restore" signal -
     /// the unlock path uses it to seed the counter from disk.
-    /// (notes for reviewers):
     /// returning nil for "missing" rather than throwing is
     /// deliberate: a missing counter is an EXPECTED first-launch
     /// state, not an error. Distinguishing it from "Keychain
@@ -132,7 +131,6 @@ public enum KeychainGenerationCounter {
     /// surface as "tamper detected" - an design false
     /// positive that would lock a legitimate user out of their
     /// freshly-created wallet.
-    /// (notes for reviewers):
     /// in production this scenario only arises if the previous
     /// wallet was explicitly deleted by some future "factory
     /// reset" UI flow (the slot files would be gone, so

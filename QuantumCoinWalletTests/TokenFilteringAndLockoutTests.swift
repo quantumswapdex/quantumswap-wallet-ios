@@ -148,6 +148,66 @@ final class TokenFilteringAndLockoutTests: XCTestCase {
         }
     }
 
+    // MARK: - INR / Rupee / Rupiah impersonator coverage
+
+    /// Indian-rupee impersonator coverage. Mirrors the Android
+    /// `inrAndRupeeAndRupiahBlocked` test one-for-one. Pins the
+    /// three new patterns added to `StablecoinImpersonatorFilter.patterns`:
+    /// `inr`, `rupee`, `rupiah`. The IDRT fixture matches via the
+    /// spelled-out `rupiah` substring on the *name* field — the
+    /// three-letter ticker `idr` is intentionally NOT in the
+    /// pattern list (see `testImpersonatesStablecoinIgnoresInrFalsePositiveGuard`
+    /// for the design lockdown).
+    func testImpersonatesStablecoinMatchesInrRupeeAndRupiah() {
+        let positives: [(String?, String?)] = [
+            ("INR", nil),
+            ("eINR", nil),
+            ("cINR", nil),
+            ("INRT", nil),
+            ("wINR", nil),
+            (nil, "RupeeCoin"),
+            (nil, "Digital Rupee"),
+            ("eRupee", nil),
+            (nil, "Rupiah Token"),
+            ("IDRT", "Rupiah Token")
+        ]
+        for (sym, nm) in positives {
+            XCTAssertTrue(
+                StablecoinImpersonatorFilter.impersonatesStablecoin(
+                    symbol: sym, name: nm),
+                "Expected INR/Rupee/Rupiah impersonator match for "
+                + "(symbol=\(sym ?? "nil"), name=\(nm ?? "nil")). "
+                + "A regression here would let an Indian-rupee "
+                + "impersonator surface in the home or send pickers.")
+        }
+    }
+
+    /// False-positive guard for the INR / Rupee / Rupiah additions.
+    /// We deliberately did NOT add the three-letter `idr` substring
+    /// to the pattern list because it would also match legitimate
+    /// tokens that happen to contain those three letters as a
+    /// fragment (e.g. `Hidro`, `Idris`). If a future PR adds `idr`
+    /// to the pattern list this test will fail and force the
+    /// contributor to revisit the tradeoff documented on
+    /// `StablecoinImpersonatorFilter.patterns`.
+    func testImpersonatesStablecoinIgnoresInrFalsePositiveGuard() {
+        let negatives: [(String?, String?)] = [
+            ("HID", "Hidro"),
+            ("IDR", "Idris")
+        ]
+        for (sym, nm) in negatives {
+            XCTAssertFalse(
+                StablecoinImpersonatorFilter.impersonatesStablecoin(
+                    symbol: sym, name: nm),
+                "Did not expect impersonator match for "
+                + "(symbol=\(sym ?? "nil"), name=\(nm ?? "nil")). "
+                + "A false positive here would mean a future PR "
+                + "added the short `idr` substring to the pattern "
+                + "list, which would silently hide legitimate "
+                + "tokens like Hidro / Idris.")
+        }
+    }
+
     // MARK: - StablecoinImpersonatorFilter.filter
 
     func testFilterRemovesImpersonatorByDefault() {

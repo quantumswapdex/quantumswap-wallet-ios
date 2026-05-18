@@ -20,24 +20,47 @@ public enum BackupTarget {
     case cloud
 }
 
+/// Recovery material handed to `BackupExporter.reencryptAndExport`.
+/// Mirrors the two-branch shape of Android
+/// `CloudBackupManager.encryptWallet`: if the wallet has a seed
+/// phrase, the export rides the `seedWords` branch of
+/// `bridge.html#encryptWalletJson`; if it is a key-only wallet
+/// (`hasSeed == false`, no recoverable BIP39 phrase) the raw
+/// signing-key bytes are staged on the binary channel and the
+/// bridge rides the `fromBinaryKeys` branch. Both branches
+/// produce an interoperable cloud-`.wallet` envelope.
+public enum BackupExportPayload {
+    case seedWords([String])
+    case keys(privateKey: Data, publicKey: Data)
+}
+
 public enum BackupExporter {
 
-    /// Re-encrypt `seed` under `backupPassword` and hand the result
-    /// off to `CloudBackupManager` for the chosen `target`. Presents a
+    /// Re-encrypt the wallet's recovery material under
+    /// `backupPassword` and hand the result off to
+    /// `CloudBackupManager` for the chosen `target`. Presents a
     /// `WaitDialog` while the bridge runs and a toast / error toast on
     /// completion. All UI work happens on the main actor; the
     /// encryption itself runs on a detached task because the JS bridge
     /// `encryptWalletJson` blocks on a `WKWebView` round-trip.
     public static func reencryptAndExport(
-        seed: [String],
+        payload: BackupExportPayload,
         address: String,
         backupPassword: String,
         target: BackupTarget,
         presenter: UIViewController
     ) {
-        guard !seed.isEmpty else {
-            Toast.showError(Localization.shared.getBackupFailedByLangValues())
-            return
+        switch payload {
+            case .seedWords(let words):
+            guard !words.isEmpty else {
+                Toast.showError(Localization.shared.getBackupFailedByLangValues())
+                return
+            }
+            case .keys(let priv, let pub):
+            guard !priv.isEmpty, !pub.isEmpty else {
+                Toast.showError(Localization.shared.getBackupFailedByLangValues())
+                return
+            }
         }
         let wait = WaitDialogViewController(
             message: Localization.shared.getWaitWalletSaveByLangValues())
@@ -46,10 +69,30 @@ public enum BackupExporter {
         Task.detached(priority: .userInitiated) { [weak presenter, weak wait] in
             var encryptedJson: String? = nil
             do {
-                let walletInputJson = encodeWalletInput(seedWords: seed)
-                let envelope = try JsBridge.shared.encryptWalletJson(
-                    walletInputJson: walletInputJson, password: backupPassword)
-                encryptedJson = extractEncryptedJson(envelope)
+                switch payload {
+                    case .seedWords(let words):
+                    let walletInputJson = encodeWalletInput(seedWords: words)
+                    let envelope = try JsBridge.shared.encryptWalletJson(
+                        walletInputJson: walletInputJson, password: backupPassword)
+                    encryptedJson = extractEncryptedJson(envelope)
+                    case .keys(let priv, let pub):
+                    // Take local mutable copies so the `defer`
+                    // can zeroize them the moment the bridge call
+                    // returns. The bridge itself zeroes the
+                    // staged binary slots in its `finally`
+                    // handler (bridge.html lines 670-672); this
+                    // wipe covers the Swift-side residue.
+                    var privCopy = priv
+                    var pubCopy = pub
+                    defer {
+                        privCopy.resetBytes(in: 0..<privCopy.count)
+                        pubCopy.resetBytes(in: 0..<pubCopy.count)
+                    }
+                    let envelope = try JsBridge.shared.encryptWalletJson(
+                        privateKey: privCopy, publicKey: pubCopy,
+                        password: backupPassword)
+                    encryptedJson = extractEncryptedJson(envelope)
+                }
             } catch {
                 encryptedJson = nil
             }
@@ -67,7 +110,6 @@ public enum BackupExporter {
                         case .cloud:
                         CloudBackupManager.shared.presentFolderPicker(from: presenter) { [weak presenter] ok in
                             guard ok else { return }
-                            // (notes for reviewers):
                             // `writeWalletFile` returns a
                             // `BackupWriteOutcome` enum that
                             // distinguishes:
@@ -142,10 +184,14 @@ public enum BackupExporter {
 
     // MARK: - Bridge envelope helpers
 
-    /// JSON-encode the `walletInput` payload that `bridge.html#encryptWalletJson`
-    /// expects. The bridge accepts a `{seedWords:[...]}` shape (preferred —
-    /// matches `bridge.html` line 372) or `{privateKey, publicKey}`. We always
-    /// use the seed-words shape because that is the canonical recovery material.
+    /// JSON-encode the `walletInput` payload that
+    /// `bridge.html#encryptWalletJson` expects for the seed-words
+    /// branch. The matching key-bytes branch lives behind the
+    /// `JsBridge.encryptWalletJson(privateKey:publicKey:password:)`
+    /// overload, which stages the bytes on the binary channel and
+    /// sets `walletInput` to the `{"fromBinaryKeys":true}`
+    /// discriminator directly — so this helper is only invoked
+    /// from `.seedWords` payloads.
     static func encodeWalletInput(seedWords: [String]) -> String {
         let walletInput: [String: Any] = ["seedWords": seedWords]
         guard let data = try? JSONSerialization.data(withJSONObject: walletInput),

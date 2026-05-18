@@ -2,7 +2,7 @@
 // Hardened wrapper around `UIPasteboard.general` for
 // sensitive material (seed phrases, mnemonics, private keys, wallet
 // addresses, transaction hashes).
-// Why a wrapper exists at all (notes for reviewers):
+// Why a wrapper exists at all:
 // The default `UIPasteboard.general.string =` shape that the app used
 // to call has two security-relevant defaults that are wrong for a
 // wallet that holds high-value assets:
@@ -34,8 +34,6 @@
 // app and paste, then the OS evicts the item even if nothing else
 // is copied. Per-call override is supported for the rare site that
 // can prove a longer or shorter window is appropriate.
-//
-// (notes for reviewers):
 // the previous default was 60 s; lowered to 30 s because:
 //   * Every existing call site is either a seed-phrase copy
 //     (already overrode to 30 s) or a wallet-address / tx-hash
@@ -62,7 +60,6 @@ public enum Pasteboard {
     /// Default lifetime for a copy of any sensitive value. Tuned for
     /// "user can paste reliably within this window" while keeping
     /// residual exposure short. Per-call override is supported.
-    /// (notes for reviewers):
     /// 30 s is the post-tightening default; see the header
     /// comment for the rationale and the call-site survey.
     public static let defaultLifetime: TimeInterval = 30

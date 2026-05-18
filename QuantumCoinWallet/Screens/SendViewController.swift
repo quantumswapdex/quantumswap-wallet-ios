@@ -107,6 +107,22 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
     private let amountField = UITextField()
 
     private let sendButton = GreenPillButton(type: .system)
+    /// Trailing action row that hosts the Send pill. Promoted to an
+    /// instance property so the keyboard-avoidance focus observer
+    /// can union its frame with the focused responder's frame and
+    /// keep the Send button visible when the user is filling in the
+    /// amount / address fields.
+    private let sendRow = UIStackView()
+    /// Outer scroll view that wraps the entire form. Promoted to an
+    /// instance property so the keyboard-avoidance observer in
+    /// `handleResponderDidBeginEditing` can call
+    /// `scrollRectToVisible` from outside `viewDidLoad`. The bottom
+    /// anchor uses the hybrid `safeAreaLayoutGuide.bottomAnchor`
+    /// (defaultHigh) + `lessThanOrEqualTo
+    /// keyboardLayoutGuide.topAnchor` (required) pattern, so the
+    /// scroll view sits at the safe-area bottom when no keyboard is
+    /// docked and shrinks to keyboard top when one is.
+    private let scroll = UIScrollView()
 
     // MARK: - State
 
@@ -365,7 +381,8 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         sendButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
         let sendSpacer = UIView()
         sendSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let sendRow = UIStackView(arrangedSubviews: [sendSpacer, sendButton])
+        sendRow.addArrangedSubview(sendSpacer)
+        sendRow.addArrangedSubview(sendButton)
         sendRow.axis = .horizontal
         sendRow.alignment = .center
 
@@ -407,11 +424,41 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         stack.setCustomSpacing(4, after: amountLabel)
         stack.setCustomSpacing(14, after: amountField)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(stack)
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.alwaysBounceVertical = true
+        scroll.keyboardDismissMode = .interactive
+        view.addSubview(scroll)
+        scroll.addSubview(stack)
+
+        // Hybrid bottom anchor (mirrors the
+        // `HomeWalletViewController` pattern):
+        //   - `safeBottom` (defaultHigh) keeps the scroll view's
+        //     bottom edge at the safe-area bottom when no keyboard
+        //     is docked, preserving the legacy layout and the
+        //     home-indicator gap.
+        //   - `kbCap` (required) hard-caps the scroll view's bottom
+        //     to the keyboard top whenever the keyboard is docked,
+        //     so the focused address / amount field and the Send
+        //     pill never sit behind the keyboard. Autolayout breaks
+        //     `safeBottom` in favor of `kbCap` while the keyboard
+        //     is up.
+        let safeBottom = scroll.bottomAnchor.constraint(
+            equalTo: view.safeAreaLayoutGuide.bottomAnchor)
+        safeBottom.priority = .defaultHigh
+        let kbCap = scroll.bottomAnchor.constraint(
+            lessThanOrEqualTo: view.keyboardLayoutGuide.topAnchor)
+        kbCap.priority = .required
         NSLayoutConstraint.activate([
-                stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-                stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-                stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16)
+                scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+                scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                safeBottom,
+                kbCap,
+                stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 8),
+                stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -8),
+                stack.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor, constant: 16),
+                stack.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor, constant: -16),
+                stack.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor, constant: -32)
             ])
 
         // Apply alpha-dim press feedback to QR scan, asset picker, and
@@ -427,6 +474,25 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
             name: .networkConfigDidChange,
             object: nil)
 
+        // Keyboard avoidance: when the user focuses the address
+        // (`UITextView`) or amount (`UITextField`) field, scroll the
+        // union of the focused responder's frame and the Send-row's
+        // frame into the visible region of `scroll`. The
+        // `kbCap` constraint above already shrinks the scroll view
+        // to exclude the keyboard, so `scrollRectToVisible` is
+        // operating on the post-keyboard visible bounds and the
+        // Send pill never gets stranded behind the keyboard.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleResponderDidBeginEditing(_:)),
+            name: UITextField.textDidBeginEditingNotification,
+            object: nil)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleResponderDidBeginEditing(_:)),
+            name: UITextView.textDidBeginEditingNotification,
+            object: nil)
+
         loadTokens()
         refreshBalance()
     }
@@ -434,6 +500,28 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
     deinit {
         NotificationCenter.default.removeObserver(self)
         addressValidationTask?.cancel()
+    }
+
+    /// Scrolls the union of the focused responder and the trailing
+    /// Send-button row above the on-screen keyboard. Mirrors the
+    /// helper in `HomeWalletViewController` so the address /
+    /// amount fields and the Send pill all stay reachable on
+    /// shorter devices once the keyboard docks. Defers the scroll
+    /// one runloop tick so the `keyboardLayoutGuide`-driven layout
+    /// pass has finished updating `scroll`'s frame before
+    /// `scrollRectToVisible` runs.
+    @objc private func handleResponderDidBeginEditing(_ note: Notification) {
+        guard let responder = note.object as? UIView,
+            responder.isDescendant(of: scroll) else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.view.layoutIfNeeded()
+            var target = responder.convert(responder.bounds, to: self.scroll)
+            target = target.insetBy(dx: 0, dy: -8)
+            let rowRect = self.sendRow.convert(self.sendRow.bounds, to: self.scroll)
+            target = target.union(rowRect)
+            self.scroll.scrollRectToVisible(target, animated: true)
+        }
     }
 
     // MARK: - Back / network header
@@ -454,7 +542,6 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
     /// the wallet selection changes, `loadTokens` returns fresh
     /// data, or the anti-impersonation "Show Unrecognized Tokens" toggle flips
     /// so the checkmark on the active row stays correct.
-    ///
     /// Filtering rules (post-impersonator-filter input):
     /// - Native QuantumCoin always appears as the first row.
     /// - Tokens whose contract is in `RecognizedTokens.all` always
@@ -772,7 +859,6 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         }
         scanner.onScan = { [weak self, weak scanner] payload in
             scanner?.dismiss(animated: true) {
-                // (notes for reviewers):
 // single source of truth for
                 // "is this an address?" is the QuantumCoin SDK
                 // call (`bridge.isValidAddress`), not the local
@@ -817,7 +903,8 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
     /// QuantumCoin address suitable for the To field. Returns
     /// `nil` if the payload cannot be reduced to a valid
     /// address shape.
-    /// Accepted inputs (notes for reviewers):/// /// 1. `quantumcoin:<0x 64-hex>` (canonical shape emitted
+    /// Accepted inputs:
+    /// 1. `quantumcoin:<0x 64-hex>` (canonical shape emitted
     /// by this build's ReceiveViewController). The scheme
     /// is matched case-insensitively.
     /// 2. `quantumcoin:<0x 64-hex>?<query>` - the query
@@ -848,7 +935,7 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
     /// from a current build before this Send screen will
     /// accept it. That is a deliberate sharp edge, not an
     /// oversight - see the rejection rationale above.
-    /// (notes for reviewers):/// the QR-scan callback above performs the SDK
+    /// The QR-scan callback above performs the SDK
     /// validation step on the candidate returned from this
     /// helper. This helper itself is intentionally
     /// validation-free: it ONLY parses the QR payload shape
@@ -1019,7 +1106,6 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
     // MARK: - Send pipeline
 
     @objc private func tapSend() {
-        // (notes for reviewers):
 // the validation order is intentional and design-significant.
         //   1. Address non-empty + SDK `isValidAddressAsync` shape
         //      check FIRST. The SDK is the canonical source of
@@ -1178,7 +1264,6 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         let captured = NetworkConfig.currentSync
         let capturedFrom = from
         Task { [weak self] in
-            // (notes for reviewers):
 // the TO checksum MUST come from the SDK or the
             // dialog MUST NOT render. A silent fallback to the
             // raw lowercased form would show the recipient as a
@@ -1309,7 +1394,6 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
             Task.detached(priority: .userInitiated) {
                 [weak self, weak dlg, weak wait, selectedTokenContract, weiAmount] in
                 // Phase 1 - decrypt
-                // (notes for reviewers):
 // the decrypted private/public key
                 // bytes flow through the binary channel; we
                 // hold them as `Data` so the `defer { resetBytes }`
@@ -1323,66 +1407,56 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
                     }
                 }
                 do {
-                    // Reading the per-wallet encrypted seed
-                    // envelope is a pure in-memory snapshot
-                    // lookup. The password-dependent step is the
-                    // JS bridge's inner decrypt of that envelope,
-                    // which is its OWN brute-force surface (the
-                    // per-wallet `encryptedSeed` is sealed under
-                    // the same user password as `passwordWrap`,
-                    // so an unlimited oracle here would defeat
-                    // the strongbox unlock dialog's lockout).
-                    // (notes for reviewers):
-// this `decryptWalletJson`
-                    // call is wrapped in
-                    // `UnlockCoordinatorV2.runRateLimited(...)`
-                    // so the shared `UnlockAttemptLimiter` gates
-                    // it identically to the strongbox unlock
-                    // dialog. Without that wrapper the Send
-                    // screen would be an unrate-limited brute-
-                    // force surface against the user password.
-                    // Bridge failures (wrong password OR corrupt
-                    // envelope) are indistinguishable at this
-                    // layer; we conservatively count them as
-                    // failures because the worse failure mode is
-                    // re-opening that password oracle.
-                    guard let encrypted = Strongbox.shared.encryptedSeed(at: walletIndex) else {
-                        throw UnlockCoordinatorV2Error.notUnlocked
-                    }
-                    let env = try UnlockCoordinatorV2.runRateLimited {
-                        try JsBridge.shared.decryptWalletJson(
-                            walletJson: encrypted, password: pw)
-                    }
-                    // (notes for reviewers):
-// the decrypted envelope
-                    // MUST belong to the wallet the
-                    // user reviewed and confirmed in the
-                    // transaction-review dialog. If a stale or
-                    // mismatched per-wallet ciphertext somehow
-                    // ends up in `Strongbox.encryptedSeed(at:)`
+                    // The per-wallet keys live in cleartext inside
+                    // the unlocked strongbox snapshot (the strongbox
+                    // AEAD is the only encryption layer over them).
+                    // We still re-prompt for the password and run
+                    // it through `UnlockCoordinatorV2.verifyPassword`
+                    // BEFORE pulling the keys, for two reasons:
+                    //   (1) Re-authentication: a momentarily-
+                    //       unattended unlocked phone cannot send
+                    //       funds without the password, matching
+                    //       the historical Send-screen UX.
+                    //   (2) Brute-force gating: `verifyPassword`
+                    //       runs a full scrypt + AEAD-open of the
+                    //       passwordWrap envelope and routes
+                    //       failures through `UnlockAttemptLimiter
+                    //       .strongboxUnlock`, identical to the
+                    //       primary unlock dialog. Without it, the
+                    //       Send screen would be an unrate-limited
+                    //       brute-force surface against the user
+                    //       password.
+                    try UnlockCoordinatorV2.verifyPassword(pw)
+                    // the snapshot must still hold the wallet at
+                    // `walletIndex` after `verifyPassword`
+                    // returns. If a stale or mismatched address
+                    // somehow ends up at `Strongbox.address(forIndex:)`
                     // (corrupted slot, race against an in-flight
                     // wallet-switch, malicious slot-file
-                    // tampering), the decrypted private key
-                    // would sign FROM a different address than
-                    // the one shown in the review dialog -
-                    // silently broadcasting the user's funds out
-                    // of the wrong wallet.
-                    let decryptedAddress = env.address.lowercased()
-                    if !decryptedAddress.isEmpty,
-                    decryptedAddress != capturedFromAddress.lowercased() {
-                        // Wipe the just-fetched binaries
-                        // explicitly here too; the `defer` above
-                        // will zero whatever assignment we made
-                        // but on this throw path `decryptedKeys`
-                        // never gets assigned.
-                        var p = env.privateKey; var pub = env.publicKey
-                        p.resetBytes(in: 0..<p.count)
-                        pub.resetBytes(in: 0..<pub.count)
+                    // tampering), the read-back private key would
+                    // sign FROM a different address than the one
+                    // shown in the review dialog — silently
+                    // broadcasting the user's funds out of the
+                    // wrong wallet.
+                    let snapshotAddress = Strongbox.shared.address(forIndex: walletIndex) ?? ""
+                    if !snapshotAddress.isEmpty,
+                    snapshotAddress.lowercased() != capturedFromAddress.lowercased() {
                         throw NetworkAssertionError.walletSwitchedMidFlight(
                             capturedAddress: capturedFromAddress,
-                            currentAddress: env.address)
+                            currentAddress: snapshotAddress)
                     }
-                    decryptedKeys = env
+                    guard
+                        let priv = Strongbox.shared.privateKey(at: walletIndex),
+                        let pub = Strongbox.shared.publicKey(at: walletIndex)
+                    else {
+                        throw UnlockCoordinatorV2Error.notUnlocked
+                    }
+                    decryptedKeys = JsBridge.WalletEnvelope(
+                        address: snapshotAddress,
+                        seed: nil,
+                        seedWords: nil,
+                        privateKey: priv,
+                        publicKey: pub)
                 } catch {
                     // Forward the typed error so the
                     // UI can render the lockout-specific copy when the
@@ -1410,9 +1484,7 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
 
                 // Phase 2 - submit
                 do {
-                    // (design
-                    // notes for reviewers:
-                    // re-assert the captured network snapshot AND
+                    // Re-assert the captured network snapshot AND
                     // the captured From-address against current
                     // state BEFORE the bridge signs the transaction.
                     // If either changed, abort with an explicit
@@ -1535,6 +1607,15 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
                 case .tooManyAttempts(let seconds):
                 return UnlockAttemptLimiter.userFacingLockoutMessage(
                     remainingSeconds: seconds)
+                case .tamperDetected:
+                // Mirrors the HomeWalletViewController mapping so a
+                // mid-transaction key-load failure surfaces the
+                // localized "wallet data unreadable" copy instead
+                // of the bare enum-case description. See the
+                // companion comment in
+                // `HomeWalletViewController.userFacingError` for
+                // the full rationale.
+                return Localization.shared.getWalletDataUnreadableByErrors()
                 default:
                 break
             }

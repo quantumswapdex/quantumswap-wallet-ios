@@ -142,7 +142,7 @@ public final class RestoreFlow {
     /// Detailed loader: returns either a `Candidate` or a
     /// human-readable failure reason. Callers choose whether to
     /// aggregate the reasons into a UI message.
-    /// Failure modes covered explicitly (notes for reviewers):
+    /// Failure modes covered explicitly:
     /// * `.icloud` placeholder URL: an iCloud Drive file the user
     /// selected before iOS finished downloading it. The picker
     /// hands us the placeholder URL; reading it returns no bytes.
@@ -173,7 +173,6 @@ public final class RestoreFlow {
     }
 
     private func loadCandidateDetailed(from url: URL) -> CandidateLoadResult {
-        // (notes for reviewers):
 // the original
         // `let ok = url.startAccessingSecurityScopedResource`
         // captures the method reference WITHOUT invoking it,
@@ -308,7 +307,8 @@ public final class RestoreFlow {
     private func runDecryptPass(pending: [Candidate], password: String,
         host: UIViewController, dialog: BackupPasswordDialog) {
         let L = Localization.shared
-        let wait = WaitDialogViewController(message: L.getWaitWalletOpenByLangValues())
+        let wait = WaitDialogViewController(
+            message: L.getRestoreWalletsDecryptingByLangValues())
         let progressTemplate = L.getRestoreProgressOfByLangValues()
         // Phase callback wires the wait-dialog's secondary status
         // line to "Verifying..." during the integrity-check window
@@ -397,25 +397,18 @@ public final class RestoreFlow {
         }
 
         do {
-            // Decrypt the file blob with the backup password to (a)
-            // verify the password is correct and (b) recover the
-            // seed words so we can re-encrypt under the strongbox
-            // password below. Without this re-encrypt step, the
-            // inner blob would still expect the BACKUP password
-            // forever - even though the OUTER strongbox envelope
-            // uses the strongbox password - and Send / Reveal /
-            // Backup (which all decrypt with the strongbox
-            // password) would fail with `authenticationFailed` on
-            // the inner layer.
-            // (notes for reviewers):
-// the decrypted envelope holds the
-            // private/public key bytes as `Data`; we do NOT use
-            // them on this path (we re-encrypt below using
-            // `seedWords` as the input shape, which is the
-            // canonical recovery material). Wipe them as soon as
-            // the envelope leaves scope so they cannot linger in
-            // the heap during the subsequent strongbox-write
-            // round-trip.
+            // Decrypt the cloud `.wallet` blob with the backup
+            // password to (a) verify the password is correct and
+            // (b) recover the raw signing-key bytes + seed phrase
+            // so we can persist them directly into the strongbox.
+            // The strongbox stores raw bytes (no nested per-
+            // wallet envelope), so there is no re-encrypt step:
+            // `appendWallet` seals the keys under the user's
+            // strongbox password as part of the strongbox-wide
+            // AEAD, exactly like a fresh wallet creation.
+            // The keys are held as `Data` and zeroized via the
+            // `defer` once `appendWallet` has copied them into
+            // the snapshot.
             var envelope = try JsBridge.shared.decryptWalletJson(
                 walletJson: candidate.json, password: password)
             defer {
@@ -423,7 +416,6 @@ public final class RestoreFlow {
                 envelope.publicKey.resetBytes(in: 0..<envelope.publicKey.count)
             }
 
-            // (notes for reviewers):
 // integrity check on the file's
             // self-declared address. The JS bridge derives the address
             // from the recovered private key; that derived value is
@@ -458,10 +450,35 @@ public final class RestoreFlow {
                 throw UnlockCoordinatorV2Error.decodeFailed
             }
 
-            let seedWords = envelope.seedWords ?? []
-            guard !seedWords.isEmpty else {
-                throw UnlockCoordinatorV2Error.decodeFailed
+            // Build the seed payload mirroring the Android sibling
+            // (HomeWalletFragment.java around line 3266): prefer the
+            // seed-words array when present, fall back to the
+            // single-string `seed` field when the array is empty,
+            // and accept the empty string when neither is present.
+            // The last case is the key-only category (Android v4
+            // imported-by-keys wallets, ports of `walletFromKeys`)
+            // where the backup file carries privateKey/publicKey
+            // bytes but no recoverable BIP39 phrase. The historical
+            // iOS shape threw `decodeFailed` when the array was
+            // empty and the outer batch flow then surfaced the
+            // generic "Unable to decrypt any wallet with that
+            // password" alert - misleading because the password
+            // had already been verified by the bridge before the
+            // seed shape was even inspected. Now the strongbox
+            // entry is written with `hasSeed = false`, the
+            // reveal-seed / backup-by-seed surfaces handle the
+            // missing-seed case via the existing `hasSeed`
+            // accessor, and send / sign flows continue to use the
+            // raw key bytes unchanged.
+            let seedJoined: String
+            if let words = envelope.seedWords, !words.isEmpty {
+                seedJoined = words.joined(separator: ",")
+            } else if let seed = envelope.seed, !seed.isEmpty {
+                seedJoined = seed
+            } else {
+                seedJoined = ""
             }
+            let hasSeed = !seedJoined.isEmpty
             // The strongbox password used for strongbox writes is
             // either:
             // - Onboarding (fresh install) cloud-restore path: the
@@ -483,22 +500,14 @@ public final class RestoreFlow {
             } else {
                 strongboxWritePw = password
             }
-            // Re-encrypt the recovered seed under the STRONGBOX
-            // password so the stored wallet's INNER layer matches
-            // what Send / Reveal / Backup (and any other unlock-
-            // password-driven flow) expects. Mirrors
-            // `commitGeneratedWallet` in `HomeWalletViewController`:
-            // build a `{seedWords:[...]}` payload, run it through
-            // `bridge.encryptWalletJson` with the strongbox
-            // password, then unwrap the envelope's inner string.
-            let walletInputJson = BackupExporter.encodeWalletInput(
-                seedWords: seedWords)
-            let reencryptedEnv = try JsBridge.shared.encryptWalletJson(
-                walletInputJson: walletInputJson, password: strongboxWritePw)
-            guard let reencrypted = BackupExporter.extractEncryptedJson(
-                reencryptedEnv) else {
-                throw UnlockCoordinatorV2Error.decodeFailed
-            }
+            // Persist the recovered raw bytes into the strongbox
+            // under the STRONGBOX password. There is no nested
+            // per-wallet envelope: the strongbox AEAD is the only
+            // encryption layer, so the wallet's key material is
+            // sealed under the strongbox password as part of the
+            // payload-wide write. Send / Reveal / Backup all read
+            // the raw bytes back out of the unlocked snapshot
+            // without a second password round.
             let idx: Int
             if !Strongbox.shared.isSnapshotLoaded,
             case .noStrongbox = UnlockCoordinatorV2.bootState() {
@@ -512,8 +521,10 @@ public final class RestoreFlow {
                 let wallet = StrongboxPayload.Wallet(
                     idx: 0,
                     address: candidate.address,
-                    encryptedSeed: reencrypted,
-                    hasSeed: true)
+                    privateKey: envelope.privateKey,
+                    publicKey: envelope.publicKey,
+                    hasSeed: hasSeed,
+                    seedWords: seedJoined)
                 try UnlockCoordinatorV2.createNewStrongboxWithInitialWallet(
                     password: strongboxWritePw,
                     initialWallet: wallet,
@@ -535,8 +546,10 @@ public final class RestoreFlow {
                 }
                 idx = try UnlockCoordinatorV2.appendWallet(
                     address: candidate.address,
-                    encryptedSeed: reencrypted,
-                    hasSeed: true,
+                    privateKey: envelope.privateKey,
+                    publicKey: envelope.publicKey,
+                    hasSeed: hasSeed,
+                    seedWords: seedJoined,
                     password: strongboxWritePw,
                     onPhase: onPhase)
             }

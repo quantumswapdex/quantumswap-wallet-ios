@@ -28,7 +28,7 @@
 // `write(_:to:)` is a thin wrapper that calls `writeAndVerify`
 // with a no-op verify so callers that don't need the deep verify
 // (the codec's re-mirror path) compile unchanged.
-// Why this exists (notes for reviewers):
+// Why this exists:
 // The legacy `PrefConnect`-backed write path (`writeJson`
 // then `Data.write(to:options: .atomic)`) is robust against
 // *abrupt-app-kill* (SIGKILL during write -> rename either
@@ -98,11 +98,11 @@
 // Tradeoffs:
 // - F_FULLFSYNC is observably slower than fsync (~5-30 ms
 // per write on modern iPhones; up to ~200 ms on older
-// devices). With 's 32 KiB bucket and the user-
-// driven write rate (one write per UI action), the cost
-// is below user perception thresholds.
-// - Two-slot rotation doubles the on-disk footprint (~64
-// KiB total). Negligible vs. user data on any iOS device.
+// devices). With StrongboxPadding's 4 MiB bucket and the
+// user-driven write rate (one write per UI action), the
+// cost is below user perception thresholds.
+// - Two-slot rotation doubles the on-disk footprint (~8 MiB
+// total). Negligible vs. user data on any iOS device.
 // - We deliberately use `Application Support/` rather than
 // `Documents/` for the slot files. has already
 // disabled `UIFileSharingEnabled` and
@@ -251,10 +251,10 @@ public final class AtomicSlotWriter {
     ///   already-loaded staged buffer. Pushing it into every caller
     ///   would duplicate the boilerplate and risk forgotten sites.
     /// Tradeoffs:
-    ///   Adds a Data == Data over up to ~32 KiB on every write.
-    ///   That is below 1 ms on every iPhone in the deployment
-    ///   target window; well below the F_FULLFSYNC cost the write
-    ///   already pays.
+    ///   Adds a Data == Data over up to ~4 MiB on every write.
+    ///   That is well below 10 ms on every iPhone in the
+    ///   deployment target window; below the F_FULLFSYNC cost the
+    ///   write already pays.
     /// Cross-references:
     ///   - `StrongboxFileCodec.scheduleReMirror` for the re-mirror
     ///     caller that uses this helper.
@@ -374,7 +374,6 @@ public final class AtomicSlotWriter {
         // in-cache copy. Then invoke the caller's verify closure
         // against the re-read bytes. Throwing aborts the rename in
         // the next step, leaving the final slot untouched.
-        // (notes for reviewers):
 // the [.uncached] hint is a Best-Effort signal to the OS;
         // it does not guarantee a media-level read on every iOS
         // release. The defense-in-depth is the codec's deep verify
@@ -411,7 +410,6 @@ public final class AtomicSlotWriter {
         // can sit in the journal indefinitely. On power loss the
         // new file's data blocks would be orphaned and the parent
         // directory would still point at the OLD inode.
-        // (notes for reviewers):
 // the previous shape LOGGED and SWALLOWED a directory-fsync
         // failure on the rationale that "the rename's metadata
         // entry is not yet on flash but the data blocks ARE, so

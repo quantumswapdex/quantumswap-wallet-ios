@@ -6,7 +6,7 @@
 // excluded from iCloud Backup AND unencrypted Finder backups; when
 // the user opts IN the flag is cleared so the files travel with
 // the standard phone-backup mechanism.
-// Why this exists (notes for reviewers):
+// Why this exists:
 // The pref `BACKUP_ENABLED_KEY` is collected on first-launch and
 // exposed as a settings row. Until this helper landed, the pref
 // was persisted but never enforced - the strongbox file was
@@ -20,18 +20,25 @@
 // first-launch toggles re-apply immediately so the user does
 // not have to wait for the next strongbox mutation to see the
 // change take effect.
-// The pref is the single source of truth even though the same
-// bit lives inside `StrongboxPayload.backupEnabled`. The pref
-// is consulted because:
-// 1. The toggle is captured BEFORE the strongbox exists
-// (during first-launch onboarding). At that moment there
-// is no decrypted snapshot to read.
-// 2. The slot-file write may run while the strongbox is
-// locked (e.g. a future background-rewrite path) - the
-// in-memory `Strongbox.shared.backupEnabled` would return
-// `false` (locked default) and silently exclude the file
-// from backup against the user's wishes. Reading the pref
-// sidesteps that hazard entirely.
+// The pref is the SOLE source of truth for the backup-enabled
+// toggle. The encrypted payload does not carry a `backupEnabled`
+// field at all (see `StrongboxPayload.swift` and Android's
+// `StrongboxPayload.java` for the matching schema). The pref is
+// consulted because:
+//   1. The toggle is captured BEFORE the strongbox exists
+//      (during first-launch onboarding). At that moment there is
+//      no decrypted snapshot to read.
+//   2. The slot-file write may run while the strongbox is locked
+//      (e.g. a future background-rewrite path) - the in-memory
+//      Strongbox.shared snapshot is unavailable while locked, so
+//      the OS-level backup decision must come from a pre-unlock
+//      surface. The pref is the only such surface.
+//   3. The OS backup agent (the iCloud Backup orchestrator) reads
+//      `isExcludedFromBackup` resource values WITHOUT unlocking
+//      the wallet; if the source-of-truth lived inside the
+//      encrypted payload, the agent could never honour it
+//      pre-unlock and the toggle would silently leak the wallet
+//      file into backups against the user's wishes.
 // Tradeoffs (what this flag does and does NOT control):
 // - DOES exclude the file from iCloud Backup.
 // - DOES exclude the file from unencrypted Finder/iTunes backups.

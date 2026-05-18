@@ -18,7 +18,7 @@
 // around for keys / ciphertexts / nonces)
 // * any single token from the BIP-39 wordlist (catches a
 // mnemonic word slipping through an exception message)
-// Why it exists (notes for reviewers):
+// Why it exists:
 // Prior reviews flagged that bare `print(...)` and
 // `console.error(...)` sites were emitting raw error context to
 // Console.app and an attached debugger. In DEBUG, that context

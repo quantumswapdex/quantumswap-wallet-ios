@@ -30,6 +30,7 @@
 
 import XCTest
 import CryptoKit
+import Network
 @testable import QuantumCoinWallet
 
 final class SecurityFixesTests: XCTestCase {
@@ -318,7 +319,6 @@ final class SecurityFixesTests: XCTestCase {
     /// `Aead.open` MUST reject an envelope whose `v` field does
     /// not match `envelopeVersion`, even if the AES-GCM payload is
     /// otherwise valid.
-    /// (notes for reviewers):
     /// the wire field exists precisely to express the "this codec
     /// version produced this envelope" compatibility contract;
     /// silently accepting any `v` would break every future schema
@@ -382,7 +382,6 @@ final class SecurityFixesTests: XCTestCase {
 
     /// `canonicalHost(_:)` MUST strip a trailing dot before lookup,
     /// otherwise a perfectly valid FQDN form bypasses the pin.
-    /// (notes for reviewers):
     /// the historical bug was `host.lowercased()` only, which let
     /// `app.readrelay.quantumcoinapi.com.` fall through to default
     /// system trust because the dictionary key is `…com` (no dot).
@@ -1019,6 +1018,71 @@ final class SecurityFixesTests: XCTestCase {
             redundantBefore,
             "verifyPassword (failure path) must not change the "
             + "redundancy state.")
+    }
+
+    // MARK: - TLS version floor
+
+    /// Asserts the `ApiClient` singleton's `URLSession` carries a
+    /// TLS 1.3 minimum-version floor AND does not cap the maximum
+    /// below TLS 1.3, so future TLS profiles can be negotiated
+    /// transparently. A regression here means scan-API traffic
+    /// could silently downgrade to TLS 1.2 on a misconfigured
+    /// release build. Sibling reference: Android
+    /// `TlsPinningConnectionSpecTest`.
+    func testApiClientSessionEnforcesTLSv13Floor() {
+        let session = ApiClient.shared.urlSessionForTests
+        XCTAssertEqual(
+            session.configuration.tlsMinimumSupportedProtocolVersion,
+            .TLSv13,
+            "ApiClient session must refuse sub-TLS-1.3 handshakes "
+            + "on every host it talks to.")
+        XCTAssertGreaterThanOrEqual(
+            session.configuration.tlsMaximumSupportedProtocolVersion.rawValue,
+            tls_protocol_version_t.TLSv13.rawValue,
+            "ApiClient session must NOT cap the TLS maximum below "
+            + "TLS 1.3; the system-chosen default must remain in "
+            + "place so a future TLS 1.4 / PQ-hardened profile can "
+            + "be negotiated transparently.")
+    }
+
+    /// Asserts the bundled `Info.plist` pins `TLSv1.3` as the ATS
+    /// minimum for the two in-process project-owned hosts (scan
+    /// API + MAINNET RPC), and explicitly does NOT carry an entry
+    /// for `quantumscan.com` — that host is opened via
+    /// `UIApplication.open(...)` (Safari hand-off) and never
+    /// traverses the app's in-process TLS stack, so an ATS entry
+    /// would be a no-op that creates the false impression of an
+    /// in-process floor.
+    func testInfoPlistExceptionDomainsPinTlsV13ForInProcessBundledHosts() {
+        // The test bundle loads into the host app process
+        // (`bundle.unit-test` with `TEST_HOST = ...QuantumCoinWallet`)
+        // so `Bundle.main` is the host app's bundle here, not the
+        // test bundle. That is the source of truth for the
+        // shipping Info.plist.
+        let plist = Bundle.main.infoDictionary
+        let ats = plist?["NSAppTransportSecurity"] as? [String: Any]
+        let domains = ats?["NSExceptionDomains"] as? [String: [String: Any]]
+        XCTAssertNotNil(domains,
+            "NSExceptionDomains must be present in the host app "
+            + "Info.plist; without it the in-process TLS-1.3 floor "
+            + "for the bundled MAINNET RPC silently degrades to the "
+            + "platform default (TLS 1.2 floor).")
+        for host in [
+            "app.readrelay.quantumcoinapi.com",
+            "public.rpc.quantumcoinapi.com"
+        ] {
+            let entry = domains?[host]
+            XCTAssertEqual(
+                entry?["NSExceptionMinimumTLSVersion"] as? String,
+                "TLSv1.3",
+                "ATS entry for \(host) must pin TLSv1.3.")
+        }
+        XCTAssertNil(domains?["quantumscan.com"],
+            "block-explorer host is opened via Safari hand-off "
+            + "(UIApplication.open) and never traverses the app's "
+            + "in-process TLS stack; an ATS entry would be a no-op "
+            + "that creates the false impression of an in-process "
+            + "floor.")
     }
 
 }

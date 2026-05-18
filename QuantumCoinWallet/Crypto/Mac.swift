@@ -12,7 +12,7 @@
 // device-only `deviceUiKey` Keychain secret. Lets the
 // pre-unlock UI namespace (EULA flag, language code) be
 // tamper-detected without requiring a wallet unlock.
-// Design discipline (notes for reviewers):
+// Design discipline:
 // * This file is the only call site for `HMAC<SHA256>` and
 // `HKDF<SHA256>` in the wallet. Other layers (especially
 // layer 2 `StrongboxFileCodec`) call into the `Mac` enum here
@@ -92,7 +92,6 @@ public enum Mac {
     /// HKDF-SHA256 Extract-then-Expand. Returns `length` bytes of
     /// key material derived from `inputKeyMaterial`, salted by
     /// `salt`, bound by the `info` context string.
-    /// (notes for reviewers):
     /// the function name explicitly says ExtractAndExpand because
     /// `HKDF.deriveKey(...)` performs both RFC 5869 §2.2 Extract
     /// and §2.3 Expand internally; the previous name `hkdfExpand`
@@ -143,7 +142,6 @@ public enum Mac {
     /// future refactor that breaks the derivation shape
     /// (different normalisation of `salt` / `info`, accidental
     /// double-Extract, etc.) fails CI before reaching review.
-    /// (notes for reviewers):
     /// the vector below is the EXACT RFC 5869 A.1 test case
     /// (IKM = 22 bytes of 0x0b, salt = 13 bytes 0x00..0x0c,
     /// info = 10 bytes 0xf0..0xf9, length = 42 bytes). Apple

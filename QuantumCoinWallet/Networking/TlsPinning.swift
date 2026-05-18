@@ -2,8 +2,7 @@
 // SubjectPublicKeyInfo (SPKI) SHA-256 pinning for
 // the TLS handshake of every CENTRALIZED endpoint the wallet
 // talks to from Swift via `URLSession` (i.e. the scan API).
-//
-// Why this exists (notes for reviewers):
+// Why this exists:
 // // (1) Baseline TLS still applies on EVERY endpoint, pinned or
 // not. URLSession (and WKWebView) validate the certificate
 // chain against the iOS system trust store, check the chain
@@ -13,18 +12,14 @@
 // below mean "no TLS"; they mean "no SPKI pin on top of TLS."
 // A passive eavesdropper on the network cannot read or
 // modify our traffic regardless of pinning.
-//
 // (2) Pinning is an additional defense the wallet only enables
 // for endpoints where:
-//
 // (a) the wallet is the sole reasonable user of that endpoint
 // (i.e. no other client - browser, third-party tool -
 // would talk to it on behalf of the user), AND
-//
 // (b) the wallet is operationally responsible for the endpoint
 // (i.e. the project ships the SPKI rotation procedure as
 // part of the app release cadence).
-//
 // The scan API meets both gates: the wallet UI is the only
 // consumer; the project owns the certificate; rotation is on
 // our timetable. Pinning the SPKI raises the bar from "any
@@ -33,17 +28,13 @@
 // cycle) does NOT break the pin as long as the underlying
 // private key is reused; only a key rotation requires
 // updating this file and shipping a new app version.
-//
 // Coverage map (what is and is NOT pinned, with the design
 // rationale for each "NOT pinned" entry):
-//
 // PINNED:
 //   * `scanApiDomain` (`app.readrelay.quantumcoinapi.com`).
 //     All `ApiClient.get(...)` calls go through here.
-//
-// NOT PINNED, BY DESIGN (this is the part a security reviewer
+// NOT PINNED, BY DESIGN (this is the part an attacker
 // asked us to spell out so it is unambiguous):
-//
 //   * RPC traffic. QuantumCoin is a non-custodial wallet for
 //     a permissionless chain; the user MUST be free to point
 //     the wallet at any RPC endpoint they trust - their own
@@ -72,7 +63,6 @@
 //       That mitigation is RPC-pinning-independent and
 //       defends against a hostile RPC operator AS WELL AS
 //       a CA-compromise attacker.
-//
 //   * Block-explorer URLs opened with
 //     `UIApplication.open(...)`. The user picks any block
 //     explorer; the OS hands off to Safari which uses the
@@ -80,7 +70,6 @@
 //     user's chosen explorer's SPKI, and even if we did, the
 //     handoff is outside our process boundary. Baseline TLS
 //     still applies via Safari.
-//
 //   * User-defined networks. The user types in their own
 //     scan-API / RPC hostname; we cannot know the legitimate
 //     certificate so we fall through to system trust for any
@@ -132,6 +121,73 @@
 // | openssl dgst -sha256 -binary \
 // | openssl enc -base64
 // ```
+//
+// TLS version floor (separate from SPKI pinning, applied everywhere):
+//
+// The wallet refuses sub-TLS-1.3 handshakes on every in-process
+// outbound HTTPS endpoint. Two enforcement points cover the
+// surface together:
+//
+//   * Scan API (Swift `URLSession`): the singleton session in
+//     `Data/ApiClient.swift` sets
+//     `URLSessionConfiguration.tlsMinimumSupportedProtocolVersion
+//     = .TLSv13`. A server that only speaks TLS 1.2 fails at
+//     connect time with `URLError.secureConnectionFailed` rather
+//     than downgrading. The floor applies to ANY host this
+//     session ever talks to, present or future, so it is
+//     host-agnostic by construction.
+//
+//   * Bundled MAINNET RPC (`WKWebView` JsonRpcProvider): iOS does
+//     not expose a per-`WKWebView` minimum-TLS API. The only
+//     iOS-side lever for the RPC path is per-domain ATS, so
+//     `Info.plist` carries `NSAppTransportSecurity.NSExceptionDomains`
+//     entries for `app.readrelay.quantumcoinapi.com` and
+//     `public.rpc.quantumcoinapi.com` with
+//     `NSExceptionMinimumTLSVersion = TLSv1.3`. ATS per-domain
+//     floors apply to both `URLSession` and `WKWebView` HTTPS
+//     loads, so the scan-API host gets two reinforcing floors
+//     (URLSession + ATS) and the RPC host gets one (ATS).
+//
+//   * Block-explorer host (`quantumscan.com`): intentionally NOT
+//     in the ATS list. Block-explorer URLs are opened via
+//     `UIApplication.open(...)`, which hands off to Safari outside
+//     our process. iOS app-side ATS has no effect on that
+//     handshake. Baseline TLS via Safari (which on recent iOS
+//     versions negotiates TLS 1.3 by default) still applies.
+//
+//   * User-defined custom RPC hostnames: cannot be enumerated at
+//     build time, so they cannot carry an ATS entry. They fall
+//     through to the platform ATS default (TLS 1.2 minimum). The
+//     Android sibling `TlsPinning.java` has the identical WebView
+//     limitation; lifting the floor for arbitrary user-supplied
+//     hosts requires routing RPC through Swift `URLSession` (a
+//     structural change deferred from this commit).
+//
+// We deliberately leave `tlsMaximumSupportedProtocolVersion` at
+// its default sentinel and never call any cipher-suite restriction
+// API. Cipher curation is the system's job, and freezing the suite
+// list here would risk excluding future PQC-bundled AEADs.
+//
+// Post-quantum key exchange:
+//
+// In TLS 1.3 the cipher suite is decoupled from the key exchange:
+// suites name only the AEAD + hash, and key exchange is negotiated
+// independently via the `supported_groups` extension (NamedGroup).
+// `URLSessionConfiguration` does not expose the NamedGroup
+// surface; it is set at the CoreTLS / Network framework layer.
+// Recent iOS versions advertise the hybrid group `X25519MLKEM768`
+// (FIPS 203 ML-KEM-768 + X25519, IETF
+// `draft-ietf-tls-hybrid-design`) by default; older iOS versions
+// negotiate classical groups (`X25519`, `secp256r1`). Refer to
+// Apple's release notes for the current OS-version threshold.
+// When both the OS and the server advertise the hybrid group it
+// is negotiated automatically and the handshake becomes
+// harvest-now-decrypt-later resistant for the rest of that
+// connection. Pinning TLS 1.3 cipher suites does NOT inhibit PQ
+// because PQ lives in the key-exchange layer, not the AEAD layer.
+// The wallet does nothing to either enable or inhibit PQ — it
+// lets the OS negotiate, mirroring Android's "let Conscrypt pick"
+// posture in `TlsPinning.java`.
 
 import Foundation
 import CryptoKit
@@ -194,7 +250,6 @@ public enum TlsPinning {
     /// in `kSpkiPinsByHost`. Used by the network-config view to
     /// render a closed-padlock vs open-padlock badge next to each
     /// network's name.
-    /// (notes for reviewers):
     /// the lookup MUST go through `canonicalHost(_:)` so a hostname
     /// with a trailing dot (`app.readrelay.quantumcoinapi.com.`)
     /// matches the dictionary key. Without this normalization the
@@ -210,7 +265,6 @@ public enum TlsPinning {
     // -----------------------------------------------------------
     // Hostname canonicalization. Single source of truth for
     // "what string do we feed to `kSpkiPinsByHost` lookups?".
-    // (notes for reviewers):
 // every site that consults `kSpkiPinsByHost` MUST route the
     // raw host string through here. The previous code path used
     // `host.lowercased()` directly, which let a trailing-dot FQDN
