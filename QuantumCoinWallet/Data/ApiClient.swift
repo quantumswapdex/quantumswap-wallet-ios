@@ -8,11 +8,46 @@
 
 import Foundation
 
-public enum ApiError: Error {
+public enum ApiError: Error, CustomStringConvertible {
+
+    /// Detail string returned by the scan API (and used for client-side
+    /// throttle short-circuits) on HTTP 429.
+    public static let scanApiRateLimitDetail =
+        "Request exceeded limit. Please retry after sometime"
+
+    /// User-facing copy for scan-API rate limiting (HTTP 429 or global
+    /// backoff). Callers prefix with context, e.g. "Unable to fetch balance: ".
+    public static func rateLimitUserMessage(detail: String? = scanApiRateLimitDetail) -> String {
+        let trimmed = detail?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmed, !trimmed.isEmpty {
+            return "the server is temporarily rate-limiting requests (\(trimmed)). Please wait a minute and try again."
+        }
+        return "the server is temporarily rate-limiting requests. Please wait a minute and try again."
+    }
+
     case offline
     case http(status: Int, body: String?)
     case decode(Error)
     case other(Error)
+
+    public var description: String {
+        switch self {
+            case .offline:
+            return "network connection unavailable."
+            case .http(let status, let body):
+            if status == 429 {
+                return Self.rateLimitUserMessage(detail: body)
+            }
+            if let body, !body.isEmpty {
+                return "server returned HTTP \(status): \(body)"
+            }
+            return "server returned HTTP \(status)."
+            case .decode:
+            return "unexpected response from the server."
+            case .other(let err):
+            return err.localizedDescription
+        }
+    }
 }
 
 public final class ApiClient: @unchecked Sendable {
@@ -157,12 +192,22 @@ public final class ApiClient: @unchecked Sendable {
         req.httpMethod = "GET"
         req.setValue("application/json", forHTTPHeaderField: "Accept")
 
+        if ScanApiRateLimiter.shared.isThrottled() {
+            throw ApiError.http(
+                status: 429,
+                body: ApiError.scanApiRateLimitDetail)
+        }
+
         do {
             let (data, resp) = try await session.data(for: req)
             guard let http = resp as? HTTPURLResponse else {
                 throw ApiError.other(URLError(.badServerResponse))
             }
             guard (200..<300).contains(http.statusCode) else {
+                if http.statusCode == 429 {
+                    ScanApiRateLimiter.shared.recordRateLimit(
+                        retryAfter: ScanApiRateLimiter.retryAfterSeconds(from: http))
+                }
                 throw ApiError.http(status: http.statusCode,
                     body: String(data: data, encoding: .utf8))
             }

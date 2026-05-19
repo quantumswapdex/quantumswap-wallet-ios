@@ -78,13 +78,22 @@ public final class HomeViewController: UIViewController {
     /// is in the app switcher) the slower cadence keeps it from
     /// hammering the scan API.
     private var balanceTimer: Timer?
-    private static let foregroundIntervalRange: ClosedRange<TimeInterval> = 7...15
-    private static let backgroundIntervalRange: ClosedRange<TimeInterval> = 60...120
+    /// Slower than the Android doc's [7s, 15s] band: the public scan
+    /// API rate-limits aggressively and balance + token list share the
+    /// same host, so a tighter iOS cadence was tripping 429 in normal use.
+    private static let foregroundIntervalRange: ClosedRange<TimeInterval> = 30...60
+    private static let backgroundIntervalRange: ClosedRange<TimeInterval> = 90...180
 
     /// Re-entrancy guard for automatic balance refreshes so a slow
     /// poll can't stack repeated requests on top of each other.
-    /// Manual taps bypass the guard.
+    /// Manual taps bypass the guard unless the scan API is in backoff.
     private var balanceLoading = false
+
+    /// One-shot timer that re-enables refresh when a 429 backoff ends.
+    private var rateLimitReenableTimer: Timer?
+
+    /// Avoid stacking identical rate-limit dialogs on every refresh tap.
+    private var rateLimitDialogShown = false
 
     public override func viewDidLoad() {
         super.viewDidLoad()
@@ -212,12 +221,24 @@ public final class HomeViewController: UIViewController {
             selector: #selector(handleWalletHomeRefreshRequested),
             name: .walletHomeRefreshRequested,
             object: nil)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleScanApiRateLimitNotifyUser),
+            name: .scanApiRateLimitNotifyUser,
+            object: nil)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleScanApiThrottleDidChange),
+            name: .scanApiThrottleDidChange,
+            object: nil)
 
+        updateRefreshAvailability()
         scheduleNextBalanceTick()
     }
 
     deinit {
         balanceTimer?.invalidate()
+        rateLimitReenableTimer?.invalidate()
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -233,9 +254,14 @@ public final class HomeViewController: UIViewController {
     /// [7s, 15s] uniform-random cadence (and [60s, 120s] backgrounded).
     private func scheduleNextBalanceTick() {
         balanceTimer?.invalidate()
-        let range = (UIApplication.shared.applicationState == .active)
-            ? Self.foregroundIntervalRange
-            : Self.backgroundIntervalRange
+        let range: ClosedRange<TimeInterval>
+        if ScanApiRateLimiter.shared.isThrottled() {
+            range = Self.backgroundIntervalRange
+        } else {
+            range = (UIApplication.shared.applicationState == .active)
+                ? Self.foregroundIntervalRange
+                : Self.backgroundIntervalRange
+        }
         let interval = TimeInterval.random(in: range)
         let t = Timer.scheduledTimer(
             withTimeInterval: interval, repeats: false) { [weak self] _ in
@@ -258,9 +284,12 @@ public final class HomeViewController: UIViewController {
         // Re-sample into the faster foreground range and kick an
         // immediate one-off refresh so the user does not stare at a
         // potentially-stale balance for the first sampled interval
-        // after returning to the app.
+        // after returning to the app — unless the scan API is in a
+        // global 429 backoff window.
         scheduleNextBalanceTick()
-        refreshBalance(manual: false)
+        if !ScanApiRateLimiter.shared.isThrottled() {
+            refreshBalance(manual: false)
+        }
     }
 
     /// Pull-to-refresh dispatch from `HomeMainViewController`. Treat
@@ -268,6 +297,14 @@ public final class HomeViewController: UIViewController {
     /// balance fetch fails (the existing balance label is preserved).
     @objc private func handleWalletHomeRefreshRequested() {
         refreshBalance(manual: true)
+    }
+
+    @objc private func handleScanApiRateLimitNotifyUser() {
+        presentRateLimitWaitDialogIfNeeded()
+    }
+
+    @objc private func handleScanApiThrottleDidChange() {
+        updateRefreshAvailability()
     }
 
     @objc private func handleNetworkConfigDidChange() {
@@ -729,50 +766,97 @@ public final class HomeViewController: UIViewController {
     /// doesn't blank out the dashboard while a typing user wonders if
     /// their wallet is empty. Only the spinner stops.
     private func refreshBalance(manual: Bool) {
-        // Drop overlapping automatic ticks so a slow 5s poll can't
-        // stack request after request. Manual taps always proceed so
-        // a stuck auto-fetch can't lock the user out of retry.
         if !manual && balanceLoading { return }
-        balanceLoading = true
-
-        centerStripView.setBalance(loading: true)
         let address = centerStripView.currentAddress
-        guard !address.isEmpty else {
-            centerStripView.setBalance(loading: false)
-            balanceLoading = false
-            return
-        }
-        Task { [weak self] in
+        guard !address.isEmpty else { return }
+
+        balanceLoading = true
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            self.centerStripView.setBalance(loading: true)
+            // Yield one run-loop turn so the spinner is visible before
+            // an instant client-side 429 short-circuit returns.
+            await Task.yield()
+
+            defer {
+                self.centerStripView.setBalance(loading: false)
+                self.balanceLoading = false
+            }
+
+            if ScanApiRateLimiter.shared.isThrottled() {
+                if manual {
+                    self.presentRateLimitWaitDialogIfNeeded()
+                }
+                return
+            }
+
             do {
                 let resp = try await AccountsApi.accountBalance(address: address)
-                await MainActor.run {
-                    guard let self = self else { return }
-                    let formatted = CoinUtils.formatWei(resp.result?.balance)
-                    self.centerStripView.setBalance(formatted)
-                    self.centerStripView.setBalance(loading: false)
-                    self.balanceLoading = false
-                    // Background balance-change notifier: seed the
-                    // cache on the first observation, fire a system
-                    // notification on subsequent changes while the
-                    // app is not in the foreground. Mirrors Android's
-                    // `notificationThread` previous-vs-current diff.
-                    BalanceChangeNotifier.shared.observeBalance(
-                        formatted, address: address)
-                }
+                let formatted = CoinUtils.formatWei(resp.result?.balance)
+                self.centerStripView.setBalance(formatted)
+                BalanceChangeNotifier.shared.observeBalance(
+                    formatted, address: address)
             } catch {
-                await MainActor.run {
-                    guard let self = self else { return }
-                    self.centerStripView.setBalance(loading: false)
-                    self.balanceLoading = false
-                    if manual {
+                if case ApiError.http(let status, _) = error, status == 429 {
+                    self.scheduleNextBalanceTick()
+                    self.updateRefreshAvailability()
+                }
+                if manual {
+                    if case ApiError.http(let status, let body) = error, status == 429 {
+                        self.presentRateLimitWaitDialogIfNeeded(detail: body)
+                    } else {
                         self.presentBalanceError(error)
                     }
-                    // Auto-poll error: intentionally a no-op so the
-                    // last successful balance + token table stay
-                    // visible across transient API hiccups.
                 }
             }
         }
+    }
+
+    private func updateRefreshAvailability() {
+        let throttled = ScanApiRateLimiter.shared.isThrottled()
+        centerStripView.setRefreshEnabled(!throttled)
+        rateLimitReenableTimer?.invalidate()
+        rateLimitReenableTimer = nil
+        if throttled {
+            guard let seconds = ScanApiRateLimiter.shared.remainingSeconds() else { return }
+            rateLimitReenableTimer = Timer.scheduledTimer(
+                withTimeInterval: TimeInterval(seconds), repeats: false) { [weak self] _ in
+                guard let self = self else { return }
+                self.rateLimitDialogShown = false
+                self.updateRefreshAvailability()
+                if !ScanApiRateLimiter.shared.isThrottled() {
+                    self.refreshBalance(manual: false)
+                }
+            }
+            RunLoop.main.add(rateLimitReenableTimer!, forMode: .common)
+        } else {
+            rateLimitDialogShown = false
+        }
+    }
+
+    /// Shown at most once per 429 backoff window.
+    private func presentRateLimitWaitDialogIfNeeded(
+        detail: String? = ApiError.scanApiRateLimitDetail
+    ) {
+        guard !rateLimitDialogShown else { return }
+        rateLimitDialogShown = true
+        presentRateLimitWaitDialog(detail: detail)
+    }
+
+    /// Shown when the user taps refresh while the scan API is in a
+    /// global 429 backoff window (no network call is made).
+    private func presentRateLimitWaitDialog(
+        detail: String? = ApiError.scanApiRateLimitDetail
+    ) {
+        let L = Localization.shared
+        let title = L.getErrorTitleByLangValues().isEmpty
+        ? "Error"
+        : L.getErrorTitleByLangValues()
+        let body = "Unable to fetch balance: "
+        + ApiError.rateLimitUserMessage(detail: detail)
+        let dlg = MessageInformationDialogViewController.error(
+            title: title, message: body)
+        present(dlg, animated: true)
     }
 
     /// Dismiss-only error dialog for manual balance-refresh failures.
@@ -782,8 +866,8 @@ public final class HomeViewController: UIViewController {
         ? "Error"
         : L.getErrorTitleByLangValues()
         let body: String
-        if case ApiError.offline = error {
-            body = "Unable to fetch balance: network connection unavailable."
+        if let api = error as? ApiError {
+            body = "Unable to fetch balance: \(api.description)"
         } else {
             body = "Unable to fetch balance: \(error.localizedDescription)"
         }
@@ -877,6 +961,7 @@ public final class HomeViewController: UIViewController {
         // Android `HomeActivity.onResume` populating the address text
         // from the current index in `PrefConnect`.
         centerStripView.currentAddress = activeWalletAddress()
+        updateRefreshAvailability()
         refreshBalance(manual: false)
     }
 
