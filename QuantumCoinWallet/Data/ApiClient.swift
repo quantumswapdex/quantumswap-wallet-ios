@@ -13,7 +13,7 @@ public enum ApiError: Error, CustomStringConvertible {
     /// Detail string returned by the scan API (and used for client-side
     /// throttle short-circuits) on HTTP 429.
     public static let scanApiRateLimitDetail =
-        "Request exceeded limit. Please retry after sometime"
+        "Request exceeded limit. Please retry after some time"
 
     /// User-facing copy for scan-API rate limiting (HTTP 429 or global
     /// backoff). Callers prefix with context, e.g. "Unable to fetch balance: ".
@@ -198,18 +198,31 @@ public final class ApiClient: @unchecked Sendable {
                 body: ApiError.scanApiRateLimitDetail)
         }
 
+        await ScanApiRateLimiter.shared.acquireRequestSlot()
+        defer { ScanApiRateLimiter.shared.releaseRequestSlot() }
+
+        if ScanApiRateLimiter.shared.isThrottled() {
+            throw ApiError.http(
+                status: 429,
+                body: ApiError.scanApiRateLimitDetail)
+        }
+
         do {
             let (data, resp) = try await session.data(for: req)
             guard let http = resp as? HTTPURLResponse else {
                 throw ApiError.other(URLError(.badServerResponse))
             }
+            let bodyText = String(data: data, encoding: .utf8)
+            if ScanApiRateLimiter.looksLikeRateLimit(
+                body: bodyText, status: http.statusCode) {
+                ScanApiRateLimiter.shared.recordRateLimit(
+                    retryAfter: ScanApiRateLimiter.retryAfterSeconds(from: http))
+                throw ApiError.http(
+                    status: 429,
+                    body: bodyText ?? ApiError.scanApiRateLimitDetail)
+            }
             guard (200..<300).contains(http.statusCode) else {
-                if http.statusCode == 429 {
-                    ScanApiRateLimiter.shared.recordRateLimit(
-                        retryAfter: ScanApiRateLimiter.retryAfterSeconds(from: http))
-                }
-                throw ApiError.http(status: http.statusCode,
-                    body: String(data: data, encoding: .utf8))
+                throw ApiError.http(status: http.statusCode, body: bodyText)
             }
             do {
                 return try JSONDecoder().decode(T.self, from: data)
