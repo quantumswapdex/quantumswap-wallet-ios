@@ -299,6 +299,13 @@ public final class CenterStripView: UIView {
         refreshSwap.setLoading(loading)
     }
 
+    /// Re-applies the refresh spinner when the strip becomes visible
+    /// again after `isHidden` (Send / Receive). UIKit does not always
+    /// repaint an activity indicator that started while off-screen.
+    public func refreshBalanceLoadingAppearanceIfNeeded() {
+        refreshSwap.setLoading(refreshSwap.isShowingLoading)
+    }
+
     /// Gray out the refresh affordance while the scan API is in a 429
     /// backoff window so repeated taps do not stack error dialogs.
     public func setRefreshEnabled(_ enabled: Bool) {

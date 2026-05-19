@@ -75,8 +75,8 @@ targets:
         # Required by App Store validation (asset catalog set name).
         CFBundleIconName: "AppIcon"
         CFBundleName: "QuantumCoinWallet"
-        CFBundleShortVersionString: "1.9"
-        CFBundleVersion: "1.9"
+        CFBundleShortVersionString: "2.2"
+        CFBundleVersion: "2.2"
         UIApplicationSupportsIndirectInputEvents: true
         UILaunchStoryboardName: "LaunchScreen"
         UISupportedInterfaceOrientations:

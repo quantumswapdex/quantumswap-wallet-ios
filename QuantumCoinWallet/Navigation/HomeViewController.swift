@@ -88,6 +88,10 @@ public final class HomeViewController: UIViewController {
     /// poll can't stack repeated requests on top of each other.
     /// Manual taps bypass the guard unless the scan API is in backoff.
     private var balanceLoading = false
+    /// Bumped whenever a newer balance fetch supersedes an in-flight
+    /// one (e.g. returning home after Send). Stale tasks skip UI
+    /// updates in `defer` so they cannot hide a newer request's spinner.
+    private var balanceFetchGeneration = 0
 
     /// One-shot timer that re-enables refresh when a 429 backoff ends.
     private var rateLimitReenableTimer: Timer?
@@ -591,6 +595,7 @@ public final class HomeViewController: UIViewController {
             topBannerView.isHidden = false
             networkChipButton.isHidden = false
             centerStripView.isHidden = false
+            centerStripView.refreshBalanceLoadingAppearanceIfNeeded()
             bottomNavView.isHidden = false
             case .onboarding:
             topBannerView.isHidden = false
@@ -765,38 +770,70 @@ public final class HomeViewController: UIViewController {
     /// previous balance and token list untouched so a transient blip
     /// doesn't blank out the dashboard while a typing user wonders if
     /// their wallet is empty. Only the spinner stops.
-    private func refreshBalance(manual: Bool) {
-        if !manual && balanceLoading { return }
+    /// - Parameter force: When `true`, starts a new fetch even if an
+    ///   automatic refresh is already in flight (used after Send so
+    ///   the address-strip spinner is visible and the post-tx balance
+    ///   is reloaded). Supersedes the prior task via
+    ///   `balanceFetchGeneration`.
+    private func refreshBalance(manual: Bool, force: Bool = false) {
+        if !manual && !force && balanceLoading {
+            // A poll may have started while the strip was hidden
+            // (Send / Receive). Still show the spinner now that the
+            // strip is visible again.
+            centerStripView.setBalance(loading: true)
+            return
+        }
         let address = centerStripView.currentAddress
         guard !address.isEmpty else { return }
 
+        balanceFetchGeneration += 1
+        let generation = balanceFetchGeneration
+        let fetchAddress = address
         balanceLoading = true
+        centerStripView.setBalance(loading: true)
         Task { @MainActor [weak self] in
             guard let self = self else { return }
-            self.centerStripView.setBalance(loading: true)
-            // Yield one run-loop turn so the spinner is visible before
-            // an instant client-side 429 short-circuit returns.
+            guard generation == self.balanceFetchGeneration,
+                  fetchAddress == self.centerStripView.currentAddress else { return }
+            // Yield so the strip can lay out (especially right after
+            // returning from Send) before a fast 429 short-circuit.
             await Task.yield()
+            self.view.layoutIfNeeded()
+            self.centerStripView.setBalance(loading: true)
 
+            var keepSpinnerVisible = false
             defer {
-                self.centerStripView.setBalance(loading: false)
-                self.balanceLoading = false
+                if generation == self.balanceFetchGeneration {
+                    self.balanceLoading = false
+                    if !keepSpinnerVisible {
+                        self.centerStripView.setBalance(loading: false)
+                    }
+                }
             }
 
             if ScanApiRateLimiter.shared.isThrottled() {
                 if manual {
                     self.presentRateLimitWaitDialogIfNeeded()
                 }
+                // After Send, keep the refresh spinner visible until the
+                // backoff timer issues a real fetch (release the guard).
+                if force {
+                    keepSpinnerVisible = true
+                }
                 return
             }
 
             do {
-                let resp = try await AccountsApi.accountBalance(address: address)
+                let resp = try await AccountsApi.accountBalance(address: fetchAddress)
+                guard generation == self.balanceFetchGeneration,
+                      fetchAddress == self.centerStripView.currentAddress else { return }
                 let formatted = CoinUtils.formatWei(resp.result?.balance)
                 self.centerStripView.setBalance(formatted)
                 BalanceChangeNotifier.shared.observeBalance(
-                    formatted, address: address)
+                    formatted, address: fetchAddress)
             } catch {
+                guard generation == self.balanceFetchGeneration,
+                      fetchAddress == self.centerStripView.currentAddress else { return }
                 if case ApiError.http(let status, _) = error, status == 429 {
                     self.scheduleNextBalanceTick()
                     self.updateRefreshAvailability()
@@ -824,6 +861,8 @@ public final class HomeViewController: UIViewController {
                 guard let self = self else { return }
                 self.rateLimitDialogShown = false
                 self.updateRefreshAvailability()
+                self.centerStripView.setBalance(loading: false)
+                self.balanceLoading = false
                 if !ScanApiRateLimiter.shared.isThrottled() {
                     self.refreshBalance(manual: false)
                 }
@@ -946,7 +985,12 @@ public final class HomeViewController: UIViewController {
         apply(.onboarding)
     }
 
-    public func showMain() {
+    /// - Parameter refreshBalanceAfterNavigation: When `true`, always
+    ///   kicks off a fresh balance fetch with the strip spinner (e.g.
+    ///   after a successful Send). Defaults to `false` for ordinary
+    ///   back-navigation where coalescing with an in-flight poll is
+    ///   enough.
+    public func showMain(refreshBalanceAfterNavigation: Bool = false) {
         lastSelectedTab = .main
         beginTransactionNow(HomeMainViewController())
         apply(.mainHome)
@@ -960,9 +1004,21 @@ public final class HomeViewController: UIViewController {
         // explore / refresh have something to operate on. Mirrors
         // Android `HomeActivity.onResume` populating the address text
         // from the current index in `PrefConnect`.
-        centerStripView.currentAddress = activeWalletAddress()
+        let address = activeWalletAddress()
+        let walletChanged = address != centerStripView.currentAddress
+        centerStripView.currentAddress = address
         updateRefreshAvailability()
-        refreshBalance(manual: false)
+        if walletChanged {
+            // Drop the previous wallet's balance immediately so the
+            // strip never shows stale funds while the new fetch runs.
+            centerStripView.setBalance("0")
+        }
+        let forceRefresh = refreshBalanceAfterNavigation || walletChanged
+        if forceRefresh {
+            centerStripView.setBalance(loading: true)
+            view.layoutIfNeeded()
+        }
+        refreshBalance(manual: false, force: forceRefresh)
     }
 
     /// Returns the address tied to `WALLET_CURRENT_ADDRESS_INDEX_KEY`,

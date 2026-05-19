@@ -22,6 +22,9 @@ public final class RefreshIconSwap: UIView {
     /// fetch is a no-op.
     public var onTap: (() -> Void)?
 
+    /// Whether the spinner is currently shown instead of the icon.
+    public var isShowingLoading: Bool { loading }
+
     /// Mirrors `UIControl.isEnabled` on the inner button. Disabling
     /// also dims the icon for visual feedback.
     public var isEnabled: Bool {
@@ -34,6 +37,10 @@ public final class RefreshIconSwap: UIView {
 
     private let button = UIButton(type: .system)
     private let spinner: UIActivityIndicatorView
+    /// Mirrors the last `setLoading` call so animation restarts when
+    /// the view re-enters a visible window (e.g. the address strip was
+    /// `isHidden` during Send while a balance poll was in flight).
+    private var loading = false
 
     /// - Parameters:
     ///   - image: refresh glyph asset (`retry` in the strip's case).
@@ -81,15 +88,27 @@ public final class RefreshIconSwap: UIView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    public override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil, loading {
+            applyLoadingAppearance()
+        }
+    }
+
     /// Hide the icon and start the spinner while `loading == true`;
     /// reverse the swap when loading flips back to false. Safe to
     /// call repeatedly with the same value.
     public func setLoading(_ loading: Bool) {
+        self.loading = loading
+        applyLoadingAppearance()
+    }
+
+    private func applyLoadingAppearance() {
         button.isHidden = loading
         button.isUserInteractionEnabled = !loading
         if loading {
-            spinner.startAnimating()
             spinner.isHidden = false
+            spinner.startAnimating()
         } else {
             spinner.stopAnimating()
             spinner.isHidden = true
