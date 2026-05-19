@@ -86,6 +86,7 @@ public final class RefreshIconSwap: UIView {
     /// call repeatedly with the same value.
     public func setLoading(_ loading: Bool) {
         button.isHidden = loading
+        button.isUserInteractionEnabled = !loading
         if loading {
             spinner.startAnimating()
             spinner.isHidden = false

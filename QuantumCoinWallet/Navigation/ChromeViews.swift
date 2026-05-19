@@ -299,6 +299,12 @@ public final class CenterStripView: UIView {
         refreshSwap.setLoading(loading)
     }
 
+    /// Gray out the refresh affordance while the scan API is in a 429
+    /// backoff window so repeated taps do not stack error dialogs.
+    public func setRefreshEnabled(_ enabled: Bool) {
+        refreshSwap.isEnabled = enabled
+    }
+
     @objc private func tapCopy() {
         // Address-strip copy. Hardened wrapper.
         Pasteboard.copySensitive(currentAddress)
