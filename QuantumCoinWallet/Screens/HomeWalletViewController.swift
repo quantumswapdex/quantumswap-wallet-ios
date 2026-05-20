@@ -154,18 +154,19 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
 
     // MARK: - Keyboard avoidance
 
-    /// Scroll the freshly-focused text field into view together with
-    /// the action row (Next pill) that lives at the bottom of
-    /// `contentStack`. Triggered by `UITextField.textDidBeginEditingNotification`
-    /// so it covers BOTH the initial tap on a seed cell AND the
-    /// auto-advance hop driven by `SeedChipGrid.advanceFocus(after:)`.
-    /// The visible region of `scroll` is already shrunken by the
-    /// `keyboardLayoutGuide`-pinned bottom constraint, but UIKit's
-    /// implicit "scroll responder into view" only fires reliably on
-    /// the first tap and does not factor in the trailing action
-    /// pill; computing the union with the last arranged subview
-    /// (`Next` row) keeps the action button visible too so the user
-    /// can submit without having to dismiss the keyboard first.
+    /// Scroll the freshly-focused text field into view. Triggered by
+    /// `UITextField.textDidBeginEditingNotification` so it covers BOTH
+    /// the initial tap on a seed cell AND the auto-advance hop driven
+    /// by `SeedChipGrid.advanceFocus(after:)`.
+    ///
+    /// Seed-grid cells (`SeedAutoCompleteTextField`) only scroll the
+    /// chip plus BIP39 dropdown slack into view. Android does not
+    /// yank the `ScrollView` down to the Next button when A1 is
+    /// focused; unioning the field with the bottom action row hid the
+    /// active chip and its suggestions on restore/verify.
+    ///
+    /// Password fields still union the Next row so set-password steps
+    /// keep the action pill above the keyboard.
     @objc private func handleTextFieldDidBeginEditing(_ note: Notification) {
         guard let field = note.object as? UITextField,
             field.isDescendant(of: scroll) else { return }
@@ -181,15 +182,11 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
             guard let self = self else { return }
             self.view.layoutIfNeeded()
             var target = field.convert(field.bounds, to: self.scroll)
-            // Include a small bottom padding so the field is not
-            // flush against the keyboard top.
             target = target.insetBy(dx: 0, dy: -8)
-            // Union the field rect with the Next-button row (the
-            // last arranged subview of `contentStack`) so both stay
-            // visible. `contentStack` is itself a subview of
-            // `scroll`, so the conversion lands in scroll-content
-            // coordinates.
-            if let actionRow = self.contentStack.arrangedSubviews.last {
+            if let seedField = field as? SeedAutoCompleteTextField {
+                let dropdownSlack = CGFloat(seedField.maxSuggestions) * 32 + 12
+                target.size.height += dropdownSlack
+            } else if let actionRow = self.contentStack.arrangedSubviews.last {
                 let actionRect = actionRow.convert(actionRow.bounds, to: self.scroll)
                 target = target.union(actionRect)
             }
@@ -197,10 +194,18 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         }
     }
 
+    /// Reset scroll to the top when swapping wizard steps so a prior
+    /// step's content offset does not leave the first seed row off-screen.
+    private func resetScrollToTop() {
+        let topY = -scroll.adjustedContentInset.top
+        scroll.setContentOffset(CGPoint(x: 0, y: topY), animated: false)
+    }
+
     // MARK: - Render
 
     private func render() {
         contentStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        resetScrollToTop()
         seedShowCaptureGuard = nil
         switch step {
             case .setPassword: renderSetPassword()
@@ -1082,6 +1087,7 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         // so no Skip button here.
         let L = Localization.shared
         contentStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        resetScrollToTop()
         let back = makeBackBar()
         let title = makeTitle(L.getEnterSeedWordsByLangValues())
         let initial = enteredRestorePhrase.count == seedLength

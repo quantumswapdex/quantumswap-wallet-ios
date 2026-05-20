@@ -10,9 +10,10 @@
 // (uppercased to match Android's `textCapCharacters` input type)
 // and dismisses the popup.
 // - When the field resigns first responder the popup hides.
-// The popup is hosted on the view's window so it floats above any
-// surrounding UIScrollView clipping. It auto-tracks the field's frame
-// while the field is editing.
+// The popup is a subview of the enclosing `UIScrollView` (not the
+// `UIWindow`) so it tracks the chip while the form scrolls and never
+// installs a window-level touch catcher — that was blocking vertical
+// pans whenever suggestions were visible (restore/verify seed grids).
 
 import UIKit
 
@@ -35,7 +36,8 @@ public final class SeedAutoCompleteTextField: UITextField {
     private var suggestions: [String] = []
     private weak var popup: UITableView?
     private weak var popupShadowContainer: UIView?
-    private weak var popupBackdrop: UIView?
+    private weak var hostingScrollView: UIScrollView?
+    private var savedScrollClipsToBounds: Bool?
 
     // MARK: - Init
 
@@ -74,45 +76,51 @@ public final class SeedAutoCompleteTextField: UITextField {
 
     private func refreshPopup() {
         guard !suggestions.isEmpty,
-        let window = window else {
+              let scroll = enclosingScrollView() else {
             hidePopup()
             return
         }
-        let table = ensurePopup(in: window)
+        let table = ensurePopup(in: scroll)
         table.reloadData()
-        positionPopup(table)
+        positionPopup(table, in: scroll)
     }
 
-    private func ensurePopup(in window: UIWindow) -> UITableView {
+    private func enclosingScrollView() -> UIScrollView? {
+        var ancestor: UIView? = superview
+        while let view = ancestor {
+            if let scroll = view as? UIScrollView { return scroll }
+            ancestor = view.superview
+        }
+        return nil
+    }
+
+    private func ensurePopup(in scroll: UIScrollView) -> UITableView {
         if let existing = popup { return existing }
-        // Backdrop captures taps outside the popup so it dismisses like
-        // a real combo box. It is transparent and only catches touches.
-        let backdrop = UIView()
-        backdrop.backgroundColor = .clear
-        backdrop.frame = window.bounds
-        backdrop.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        backdrop.addGestureRecognizer(
-            UITapGestureRecognizer(target: self, action: #selector(backdropTapped)))
-        window.addSubview(backdrop)
+
+        if savedScrollClipsToBounds == nil {
+            savedScrollClipsToBounds = scroll.clipsToBounds
+            scroll.clipsToBounds = false
+        }
+        hostingScrollView = scroll
 
         // Rounded-rect popup matching Android's M3 dropdown: 12pt
         // continuous corner. The shadow is hosted on an outer
         // container so the table itself can clipsToBounds for the
         // rounded mask without losing the shadow.
-        let shadowContainer = UIView()
+        let shadowContainer = PopupTouchContainer()
         shadowContainer.backgroundColor = .clear
         shadowContainer.layer.shadowColor = UIColor.black.cgColor
         shadowContainer.layer.shadowOpacity = 0.15
         shadowContainer.layer.shadowRadius = 4
         shadowContainer.layer.shadowOffset = CGSize(width: 0, height: 2)
-        shadowContainer.layer.shouldRasterize = true
-        shadowContainer.layer.rasterizationScale = UIScreen.main.scale
 
         let t = UITableView(frame: .zero, style: .plain)
         t.dataSource = self
         t.delegate = self
         t.separatorInset = .zero
         t.rowHeight = 32
+        t.isScrollEnabled = false
+        t.bounces = false
         t.layer.cornerRadius = 12
         t.layer.cornerCurve = .continuous
         t.clipsToBounds = true
@@ -122,55 +130,48 @@ public final class SeedAutoCompleteTextField: UITextField {
         t.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
 
         shadowContainer.addSubview(t)
-        window.addSubview(shadowContainer)
+        scroll.addSubview(shadowContainer)
+        scroll.bringSubviewToFront(shadowContainer)
         popup = t
         popupShadowContainer = shadowContainer
-        popupBackdrop = backdrop
         return t
     }
 
-    private func positionPopup(_ table: UITableView) {
-        guard let window = window else { return }
-        let frameInWindow = convert(bounds, to: window)
+    private func positionPopup(_ table: UITableView, in scroll: UIScrollView) {
+        let frameInContent = convert(bounds, to: scroll)
         let rows = max(1, min(suggestions.count, maxSuggestions))
         let height = CGFloat(rows) * table.rowHeight
         // Width: at least 140pt for short prefixes, but match the field
         // width when reasonable. Cap at 240 so very wide fields don't
         // produce an oversized dropdown.
-        let width = min(max(frameInWindow.width, 140), 240)
-        var origin = CGPoint(x: frameInWindow.minX,
-            y: frameInWindow.maxY + 2)
-        if origin.x + width > window.bounds.maxX - 8 {
-            origin.x = window.bounds.maxX - 8 - width
-        }
-        if origin.y + height > window.bounds.maxY - 8 {
+        let width = min(max(frameInContent.width, 140), 240)
+        var origin = CGPoint(x: frameInContent.minX,
+                             y: frameInContent.maxY + 2)
+        let visibleBottom = scroll.contentOffset.y
+            + scroll.bounds.height
+            - scroll.adjustedContentInset.bottom
+        if origin.y + height > visibleBottom - 8 {
             // Flip above the field if there isn't room below.
-            origin.y = frameInWindow.minY - height - 2
+            origin.y = frameInContent.minY - height - 2
         }
-        let frame = CGRect(origin: origin,
-            size: CGSize(width: width, height: height))
+        let frame = CGRect(origin: origin, size: CGSize(width: width, height: height))
         popupShadowContainer?.frame = frame
         table.frame = CGRect(origin: .zero, size: frame.size)
-        // Backdrop sits behind the popup so the popup itself is tappable.
-        popupBackdrop?.frame = window.bounds
-        if let backdrop = popupBackdrop, let shadowContainer = popupShadowContainer {
-            window.bringSubviewToFront(backdrop)
-            window.bringSubviewToFront(shadowContainer)
+        if let shadowContainer = popupShadowContainer {
+            scroll.bringSubviewToFront(shadowContainer)
         }
     }
 
     private func hidePopup() {
+        if let scroll = hostingScrollView, let saved = savedScrollClipsToBounds {
+            scroll.clipsToBounds = saved
+        }
+        savedScrollClipsToBounds = nil
+        hostingScrollView = nil
         popup?.removeFromSuperview()
         popup = nil
         popupShadowContainer?.removeFromSuperview()
         popupShadowContainer = nil
-        popupBackdrop?.removeFromSuperview()
-        popupBackdrop = nil
-    }
-
-    @objc private func backdropTapped() {
-        hidePopup()
-        resignFirstResponder()
     }
 
     public override func resignFirstResponder() -> Bool {
@@ -180,13 +181,25 @@ public final class SeedAutoCompleteTextField: UITextField {
     }
 }
 
+/// Only forwards touches to the suggestion table; never claims hits in
+/// transparent padding so the parent `UIScrollView` keeps receiving pans.
+private final class PopupTouchContainer: UIView {
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        for subview in subviews where !subview.isHidden && subview.alpha > 0.01 {
+            let p = convert(point, to: subview)
+            if subview.point(inside: p, with: event) { return true }
+        }
+        return false
+    }
+}
+
 extension SeedAutoCompleteTextField: UITableViewDataSource, UITableViewDelegate {
     public func tableView(_ tableView: UITableView,
-        numberOfRowsInSection section: Int) -> Int {
+                          numberOfRowsInSection section: Int) -> Int {
         suggestions.count
     }
     public func tableView(_ tableView: UITableView,
-        cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+                          cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath)
         cell.textLabel?.text = suggestions[indexPath.row].uppercased()
         cell.textLabel?.font = Typography.mono(13)
@@ -196,7 +209,7 @@ extension SeedAutoCompleteTextField: UITableViewDataSource, UITableViewDelegate 
         return cell
     }
     public func tableView(_ tableView: UITableView,
-        didSelectRowAt indexPath: IndexPath) {
+                          didSelectRowAt indexPath: IndexPath) {
         let chosen = suggestions[indexPath.row]
         text = chosen.uppercased()
         sendActions(for: .editingChanged)
