@@ -469,6 +469,12 @@ UITableViewDelegate {
     /// kept decoupled via NotificationCenter so this controller does
     /// not have to walk the parent chain.
     @objc private func handlePullToRefresh() {
+        if ScanApiRateLimiter.shared.isThrottled() {
+            table.refreshControl?.endRefreshing()
+            NotificationCenter.default.post(
+                name: .scanApiRateLimitNotifyUser, object: nil)
+            return
+        }
         NotificationCenter.default.post(
             name: .walletHomeRefreshRequested, object: nil)
         loadFirstPage(replacing: true, manual: true)
@@ -492,7 +498,23 @@ UITableViewDelegate {
         // does not block the manual refresh; the generation check
         // below still discards the older request's response.
         loading = true
-        Task {
+        Task { @MainActor in
+            await Task.yield()
+            defer {
+                self.table.refreshControl?.endRefreshing()
+                if generationAtFetch == self.fetchGeneration {
+                    self.loading = false
+                }
+            }
+
+            if ScanApiRateLimiter.shared.isThrottled() {
+                if manual {
+                    NotificationCenter.default.post(
+                        name: .scanApiRateLimitNotifyUser, object: nil)
+                }
+                return
+            }
+
             let result: AccountTokenListResponse?
             let caughtError: Error?
             do {
@@ -503,36 +525,39 @@ UITableViewDelegate {
                 result = nil
                 caughtError = error
             }
-            await MainActor.run {
-                self.table.refreshControl?.endRefreshing()
-                guard generationAtFetch == self.fetchGeneration else { return }
-                self.loading = false
-                guard let resp = result else {
-                    // Preserve the existing rows on a transient
-                    // failure. Only manual taps surface an error
-                    // dialog; an auto-refetch (e.g. tab-driven)
-                    // stays silent.
-                    if manual, let err = caughtError {
-                        let dlg = MessageInformationDialogViewController.error(
-                            title: Localization.shared.getErrorTitleByLangValues(),
-                            message: "\(err)")
-                        self.present(dlg, animated: true)
+
+            guard generationAtFetch == self.fetchGeneration else { return }
+            guard let resp = result else {
+                if manual, let err = caughtError {
+                    let message: String
+                    if let api = err as? ApiError {
+                        if case .http(let status, let body) = api, status == 429 {
+                            message = ApiError.rateLimitUserMessage(detail: body)
+                        } else {
+                            message = api.description
+                        }
+                    } else {
+                        message = "\(err)"
                     }
-                    return
+                    let dlg = MessageInformationDialogViewController.error(
+                        title: Localization.shared.getErrorTitleByLangValues(),
+                        message: message)
+                    self.present(dlg, animated: true)
                 }
-                let raw = resp.result ?? []
-                let filtered = StablecoinImpersonatorFilter.filter(raw)
-                if replacing {
-                    self.items = filtered
-                    self.nextPage = 2
-                } else {
-                    self.items.append(contentsOf: filtered)
-                    self.nextPage += 1
-                }
-                self.applyFilteredItems()
-                self.reloadDisplayedItems()
-                self.applyEmptyState()
+                return
             }
+            let raw = resp.result ?? []
+            let filtered = StablecoinImpersonatorFilter.filter(raw)
+            if replacing {
+                self.items = filtered
+                self.nextPage = 2
+            } else {
+                self.items.append(contentsOf: filtered)
+                self.nextPage += 1
+            }
+            self.applyFilteredItems()
+            self.reloadDisplayedItems()
+            self.applyEmptyState()
         }
     }
 

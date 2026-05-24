@@ -16,7 +16,8 @@
 // 7) Asset selected sublabel: "QuantumCoin" for native, the token's
 // contract address for token rows.
 // 8) "Balance" label
-// 9) Balance value (loaded asynchronously)
+// 9) "Balance" label with value + leading spinner below it on first
+//    open only (native balance fetched asynchronously)
 // 10) "To address" label paired with the QR camera button + a
 // block-explorer icon on the same row. The explorer icon is
 // hidden until `JsBridge.isValidAddressAsync` confirms the
@@ -85,6 +86,11 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
 
     private let balanceLabel = UILabel()
     private let balanceValue = UILabel()
+    /// Leading spinner below the Balance label during the first
+    /// native-balance fetch after the Send screen opens.
+    private let balanceSpinner = UIActivityIndicatorView(style: .medium)
+    /// Cleared after the first `accountBalance` fetch completes.
+    private var isFirstBalanceLoad = true
 
     private let addressLabel = UILabel()
     /// Wrapping multi-line address input. `UITextView` is used (rather
@@ -273,10 +279,25 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         balanceLabel.font = Typography.mediumLabel(16)
         balanceLabel.textColor = UIColor(named: "colorCommon6") ?? .label
 
-        // 9) Balance value.
-        balanceValue.text = "0"
+        // 9) Balance label, then value + leading spinner on the row below.
+        balanceValue.text = CoinUtils.UNKNOWN_BALANCE_PLACEHOLDER
         balanceValue.font = Typography.body(18)
         balanceValue.textColor = UIColor(named: "colorCommon6") ?? .label
+        balanceSpinner.hidesWhenStopped = true
+        balanceSpinner.color = UIColor(named: "colorCommon6") ?? .label
+        balanceSpinner.translatesAutoresizingMaskIntoConstraints = false
+        let balanceContentRow = UIStackView(arrangedSubviews: [
+            balanceSpinner, balanceValue
+        ])
+        balanceContentRow.axis = .horizontal
+        balanceContentRow.alignment = .center
+        balanceContentRow.spacing = 8
+        let balanceSection = UIStackView(arrangedSubviews: [
+            balanceLabel, balanceContentRow
+        ])
+        balanceSection.axis = .vertical
+        balanceSection.alignment = .leading
+        balanceSection.spacing = 4
 
         // 10) "To address" label paired with the QR camera button +
         // a block-explorer icon. The explorer icon is hidden until
@@ -398,8 +419,7 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
                 assetLabel,
                 assetPicker,
                 assetSelectedLabel,
-                balanceLabel,
-                balanceValue,
+                balanceSection,
                 addressHeaderRow,
                 toField,
                 amountLabel,
@@ -417,8 +437,7 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         stack.setCustomSpacing(4, after: assetLabel)
         stack.setCustomSpacing(4, after: assetPicker)
         stack.setCustomSpacing(14, after: assetSelectedLabel)
-        stack.setCustomSpacing(4, after: balanceLabel)
-        stack.setCustomSpacing(14, after: balanceValue)
+        stack.setCustomSpacing(14, after: balanceSection)
         stack.setCustomSpacing(4, after: addressHeaderRow)
         stack.setCustomSpacing(14, after: toField)
         stack.setCustomSpacing(4, after: amountLabel)
@@ -720,25 +739,41 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
     }
 
     /// Refresh `balanceValue` for whichever asset is currently
-    /// selected. Native uses `AccountsApi.accountBalance`; tokens
-    /// reuse the cached balance the token endpoint already returned.
+    /// selected. Native uses `AccountsApi.accountBalance`; the leading
+    /// spinner below the Balance label is shown only on the first
+    /// native fetch after opening Send. Tokens reuse the cached balance.
     private func refreshBalance() {
         if let contract = selectedTokenContract,
         let token = tokens.first(where: { $0.contractAddress == contract }) {
+            balanceSpinner.stopAnimating()
             let decimals = token.decimals ?? 18
             balanceValue.text = CoinUtils.formatUnits(token.balance, decimals: decimals)
             return
         }
-        balanceValue.text = "0"
         let address = currentAddress()
-        guard !address.isEmpty else { return }
-        Task { [weak self] in
+        guard !address.isEmpty else {
+            balanceSpinner.stopAnimating()
+            balanceValue.text = CoinUtils.UNKNOWN_BALANCE_PLACEHOLDER
+            return
+        }
+        let showLoader = isFirstBalanceLoad
+        if showLoader {
+            balanceSpinner.startAnimating()
+        }
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            defer {
+                if showLoader {
+                    self.isFirstBalanceLoad = false
+                    self.balanceSpinner.stopAnimating()
+                }
+            }
+            if showLoader { await Task.yield() }
             do {
                 let resp = try await AccountsApi.accountBalance(address: address)
-                let pretty = CoinUtils.formatWei(resp.result?.balance)
-                await MainActor.run { self?.balanceValue.text = pretty }
+                self.balanceValue.text = CoinUtils.formatWei(resp.result?.balance)
             } catch {
-                await MainActor.run { self?.balanceValue.text = "-" }
+                self.balanceValue.text = CoinUtils.UNKNOWN_BALANCE_PLACEHOLDER
             }
         }
     }
@@ -1626,7 +1661,8 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
     private func presentSentDialog(txHash: String) {
         let dlg = TransactionSentDialogViewController(txHash: txHash)
         dlg.onClose = { [weak self] in
-            (self?.parent as? HomeViewController)?.showMain()
+            (self?.parent as? HomeViewController)?
+                .showMain(refreshBalanceAfterNavigation: true)
         }
         present(dlg, animated: true)
     }

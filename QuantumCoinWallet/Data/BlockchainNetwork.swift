@@ -45,6 +45,11 @@ public extension Notification.Name {
     /// two controllers decoupled exactly like `.networkConfigDidChange`
     /// (mirror of Android's broadcast-driven cross-fragment refresh).
     static let walletHomeRefreshRequested = Notification.Name("walletHomeRefreshRequested")
+    /// Posted when the user should be told the scan API is in a 429
+    /// backoff window (e.g. pull-to-refresh while throttled).
+    static let scanApiRateLimitNotifyUser = Notification.Name("scanApiRateLimitNotifyUser")
+    /// Posted when `ScanApiRateLimiter` enters or leaves a backoff window.
+    static let scanApiThrottleDidChange = Notification.Name("scanApiThrottleDidChange")
 }
 
 public extension CodingUserInfoKey {
