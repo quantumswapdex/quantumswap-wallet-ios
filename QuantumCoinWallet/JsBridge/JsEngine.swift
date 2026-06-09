@@ -355,6 +355,16 @@ public final class JsEngine: NSObject {
             }
             window.AndroidBridge = {
                 isDebug: function () { return \(isDebug); },
+                debugLog: function (msg) {
+                    // DEBUG-only diagnostic channel. The JS side only
+                    // calls this from `_timeLog` (gated by isDebug) with
+                    // opaque label + millisecond deltas, never any
+                    // payload-derived string. Routed to `Logger.debug`
+                    // on the native side (which is itself a no-op in
+                    // Release) so per-phase send timings reach Console
+                    // even when the overall bridge call later times out.
+                    post('debugLog', [String(msg || '')]);
+                },
                 onResult: function (requestId, jsonResult) {
                     post('onResult', [String(requestId || ''), String(jsonResult || '')]);
                 },
@@ -461,6 +471,13 @@ extension JsEngine: WKNavigationDelegate {
         if webView.url?.absoluteString == Self.bridgeURLString {
             ready.value = true
             readyLatch.signal()
+            // Fire-and-forget WASM warm-up: pay the one-time Go-WASM
+            // module compile + runtime + PQC-keygen cost now, off the
+            // critical path, so the user's first transaction does not
+            // absorb WASM bring-up on top of signing. The JS handler is
+            // best-effort and swallows its own errors; no callback is
+            // registered, so the result is discarded.
+            webView.evaluateJavaScript("_warmup()", completionHandler: nil)
         }
     }
 
@@ -564,6 +581,12 @@ private final class ScriptMessageBroker: NSObject, WKScriptMessageHandler {
         }
         guard let args = body["args"] as? [String] else { return }
         switch method {
+            case "debugLog":
+            // Diagnostic-only timing line from the JS send path.
+            // `Logger.debug` compiles to a no-op in Release, so this
+            // route is inert outside DEBUG builds.
+            guard let line = args.first else { return }
+            Logger.debug(category: "BRIDGE_TIMING", line)
             case "onResult":
             guard args.count >= 2 else { return }
             MainActor.assumeIsolated {
@@ -1039,7 +1062,14 @@ public enum JsEngineError: Error, CustomStringConvertible {
     case pendingPayloadMapFull
     case pendingBinaryMapFull
     case bridgeNotReady
-    case timeout
+    /// The bridge call did not settle within its budget. The
+    /// associated string is a human-readable diagnostic (handler
+    /// name, elapsed seconds, and the configured budget) so the
+    /// reason is visible in the user-facing error alert without
+    /// needing to attach a debugger or pull `Logger.debug` output
+    /// (which is compiled out in Release). Empty string falls back
+    /// to the generic copy.
+    case timeout(String)
     case callFailed(String)
     /// The OS RNG (`SecRandomCopyBytes`) refused to produce a
     /// capability token. Callers MUST treat this as a fail-closed
@@ -1053,7 +1083,10 @@ public enum JsEngineError: Error, CustomStringConvertible {
             case .pendingPayloadMapFull: return "pending payload map full; refusing to stage new entry"
             case .pendingBinaryMapFull: return "pending binary map full; refusing to stage new entry"
             case .bridgeNotReady: return "Bridge WebView did not become ready in time"
-            case .timeout: return "Bridge call timed out"
+            case .timeout(let detail):
+            return detail.isEmpty
+                ? "Bridge call timed out"
+                : "Bridge call timed out — \(detail)"
             case .callFailed(let m): return "Bridge call failed: \(m)"
             case .tokenGenerationFailed(let s): return "OS RNG failed to mint bridge capability token (OSStatus=\(s))"
         }
