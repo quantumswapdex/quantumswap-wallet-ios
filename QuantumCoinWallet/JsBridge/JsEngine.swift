@@ -1062,7 +1062,14 @@ public enum JsEngineError: Error, CustomStringConvertible {
     case pendingPayloadMapFull
     case pendingBinaryMapFull
     case bridgeNotReady
-    case timeout
+    /// The bridge call did not settle within its budget. The
+    /// associated string is a human-readable diagnostic (handler
+    /// name, elapsed seconds, and the configured budget) so the
+    /// reason is visible in the user-facing error alert without
+    /// needing to attach a debugger or pull `Logger.debug` output
+    /// (which is compiled out in Release). Empty string falls back
+    /// to the generic copy.
+    case timeout(String)
     case callFailed(String)
     /// The OS RNG (`SecRandomCopyBytes`) refused to produce a
     /// capability token. Callers MUST treat this as a fail-closed
@@ -1076,7 +1083,10 @@ public enum JsEngineError: Error, CustomStringConvertible {
             case .pendingPayloadMapFull: return "pending payload map full; refusing to stage new entry"
             case .pendingBinaryMapFull: return "pending binary map full; refusing to stage new entry"
             case .bridgeNotReady: return "Bridge WebView did not become ready in time"
-            case .timeout: return "Bridge call timed out"
+            case .timeout(let detail):
+            return detail.isEmpty
+                ? "Bridge call timed out"
+                : "Bridge call timed out — \(detail)"
             case .callFailed(let m): return "Bridge call failed: \(m)"
             case .tokenGenerationFailed(let s): return "OS RNG failed to mint bridge capability token (OSStatus=\(s))"
         }

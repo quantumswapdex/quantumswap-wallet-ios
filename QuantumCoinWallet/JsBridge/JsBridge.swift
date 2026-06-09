@@ -545,14 +545,18 @@ public final class JsBridge: @unchecked Sendable {
         let started = Date()
         guard let outcome = settle.waitUntilSettled(timeout: settleTimeout) else {
             JsEngine.shared.removePendingPayload(requestId: requestId)
-            if !label.isEmpty {
-                let elapsed = Date().timeIntervalSince(started)
-                Logger.debug(category: "BRIDGE_TIMING",
-                    "\(label) TIMED OUT after "
-                    + String(format: "%.1f", elapsed)
-                    + "s (budget \(String(format: "%.0f", settleTimeout))s)")
-            }
-            throw JsEngineError.timeout
+            // Build the timeout diagnostic once and surface it BOTH in
+            // the DEBUG-only timing log AND in the thrown error, so the
+            // user-facing alert carries the handler name / elapsed /
+            // budget without anyone needing to pull `Logger.debug`
+            // output (which is a no-op in Release).
+            let elapsed = Date().timeIntervalSince(started)
+            let tag = label.isEmpty ? "bridge call" : label
+            let diagnostic = "\(tag) did not respond within "
+                + String(format: "%.0f", settleTimeout) + "s "
+                + "(waited " + String(format: "%.1f", elapsed) + "s)"
+            Logger.debug(category: "BRIDGE_TIMING", "TIMED OUT: \(diagnostic)")
+            throw JsEngineError.timeout(diagnostic)
         }
         if !label.isEmpty {
             let elapsed = Date().timeIntervalSince(started)
