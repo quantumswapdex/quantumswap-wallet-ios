@@ -1508,13 +1508,16 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
                     return
                 }
 
-                // Bridge from decrypt to submit by updating the
+                // Bridge from decrypt to signing by updating the
                 // existing wait dialog's message in place. The
                 // `message` property's didSet rebinds `label.text`,
                 // so the visible card just swaps copy without any
-                // dismiss / present animation in between.
+                // dismiss / present animation in between. The send is
+                // now a two-step flow (sign locally, then broadcast),
+                // so this card walks through "signing" then
+                // "submitting" copy as each phase begins.
                 await MainActor.run {
-                    wait?.message = L.getSubmittingTransactionByLangValues()
+                    wait?.message = L.getSigningTransactionByLangValues()
                 }
 
                 // Phase 2 - submit
@@ -1555,20 +1558,88 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
                     guard let keys = decryptedKeys else {
                         throw UnlockCoordinatorV2Error.decodeFailed
                     }
+
+                    // STEP 1 - fetch the nonce NATIVELY (URLSession).
+                    // The in-WebView RPC `fetch` stalls on device while
+                    // native HTTP to the same endpoint works, so account
+                    // details are fetched here and the nonce is handed
+                    // to the (now fully-local) WebView signer. A failure
+                    // here is unambiguously the nonce-fetch phase.
+                    let nonce: Int
+                    do {
+                        nonce = try JsBridge.shared.fetchNonce(
+                            address: capturedFromAddress,
+                            rpcEndpoint: rpc, chainId: chainId)
+                    } catch {
+                        let detail = Self.userFacingError(error)
+                        await MainActor.run {
+                            wait?.dismiss(animated: true) {
+                                dlg?.dismiss(animated: true) {
+                                    self?.presentPhaseError(phase: .nonce, detail: detail)
+                                }
+                            }
+                        }
+                        return
+                    }
+
+                    // STEP 2 - sign locally (handles the private key).
+                    // Signing is fully local now (nonce supplied), so a
+                    // failure here is the signing phase; `bridge.html`
+                    // still tags signing errors `PHASE_SIGN:`.
+                    let signedTx: String
+                    do {
+                        if let contract = selectedTokenContract {
+                            signedTx = try JsBridge.shared.signTokenTransaction(
+                                privKey: keys.privateKey, pubKey: keys.publicKey,
+                                contractAddress: contract, toAddress: to,
+                                amountWei: weiAmount, gasLimit: Self.gasLimitToken,
+                                rpcEndpoint: rpc, chainId: chainId,
+                                advancedSigningEnabled: advancedSigning, nonce: nonce)
+                        } else {
+                            signedTx = try JsBridge.shared.signCoinTransaction(
+                                privKey: keys.privateKey, pubKey: keys.publicKey,
+                                toAddress: to, valueWei: weiAmount, gasLimit: Self.gasLimitNative,
+                                rpcEndpoint: rpc, chainId: chainId,
+                                advancedSigningEnabled: advancedSigning, nonce: nonce)
+                        }
+                    } catch {
+                        let phase = Self.signPhase(from: error)
+                        let detail = Self.userFacingError(error)
+                        await MainActor.run {
+                            wait?.dismiss(animated: true) {
+                                dlg?.dismiss(animated: true) {
+                                    self?.presentPhaseError(phase: phase, detail: detail)
+                                }
+                            }
+                        }
+                        return
+                    }
+
+                    // Signing succeeded; the signed transaction is a
+                    // non-secret public artifact. Swap the wait copy
+                    // to the broadcast phase before the network call.
+                    await MainActor.run {
+                        wait?.message = L.getSubmittingTransactionByLangValues()
+                    }
+
+                    // STEP 3 - broadcast NATIVELY (no key material
+                    // involved). Any failure here is unambiguously the
+                    // submission phase.
                     let result: String
-                    if let contract = selectedTokenContract {
-                        result = try JsBridge.shared.sendTokenTransaction(
-                            privKey: keys.privateKey, pubKey: keys.publicKey,
-                            contractAddress: contract, toAddress: to,
-                            amountWei: weiAmount, gasLimit: Self.gasLimitToken,
-                            rpcEndpoint: rpc, chainId: chainId,
-                            advancedSigningEnabled: advancedSigning)
-                    } else {
-                        result = try JsBridge.shared.sendTransaction(
-                            privKey: keys.privateKey, pubKey: keys.publicKey,
-                            toAddress: to, valueWei: weiAmount, gasLimit: Self.gasLimitNative,
-                            rpcEndpoint: rpc, chainId: chainId,
-                            advancedSigningEnabled: advancedSigning)
+                    do {
+                        result = try JsBridge.shared.broadcastTransaction(
+                            signedTx: signedTx, rpcEndpoint: rpc, chainId: chainId)
+                    } catch {
+                        let detail = Self.userFacingError(error)
+                        await MainActor.run {
+                            wait?.dismiss(animated: true) {
+                                dlg?.dismiss(animated: true) {
+                                    self?.presentPhaseError(
+                                        phase: .submitting, detail: detail)
+                                }
+                            }
+                        }
+                        return
                     }
                     let txHash = Self.parseTxHash(result)
                     await MainActor.run {
@@ -1673,6 +1744,60 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
             title: nonEmpty(L.getErrorTitleByLangValues()) ?? "Error",
             message: message)
         present(dlg, animated: true)
+    }
+
+    /// Which step of the two-phase send produced a failure, so the
+    /// user sees copy that names the actual problem (couldn't reach
+    /// the network for account details vs. signing vs. submission)
+    /// instead of one generic error.
+    private enum SendPhase {
+        case nonce       // couldn't fetch account details (nonce)
+        case signing     // local signing failed
+        case submitting  // broadcast to the network failed
+    }
+
+    /// Classify a sign-call failure into the nonce-fetch or signing
+    /// phase using the `PHASE_<NAME>:` prefix that `bridge.html`
+    /// stamps onto the error message (see `_phaseError`). A bridge
+    /// timeout - or any error without an explicit prefix - defaults
+    /// to the signing phase, since the sign call is where the heavy
+    /// local crypto runs.
+    nonisolated private static func signPhase(from error: Error) -> SendPhase {
+        let text = "\(error)"
+        if text.contains("PHASE_NONCE") { return .nonce }
+        return .signing
+    }
+
+    /// Render a phase-specific error alert. The body names the failed
+    /// step; the underlying error detail (which already carries the
+    /// RPC reachability probe result on timeouts) is appended for
+    /// diagnosis, with the internal `PHASE_*:` marker stripped so the
+    /// user never sees the raw tag.
+    private func presentPhaseError(phase: SendPhase, detail: String) {
+        let L = Localization.shared
+        let message: String
+        switch phase {
+            case .nonce:
+            message = L.getNonceFetchFailedByErrors()
+            case .signing:
+            message = L.getSigningFailedByErrors()
+            case .submitting:
+            message = L.getSubmitFailedByErrors()
+        }
+        let clean = Self.stripPhaseTag(detail)
+        let body = clean.isEmpty ? message : message + "\n\n" + clean
+        presentErrorDialog(message: body)
+    }
+
+    /// Strip the internal `PHASE_NONCE:` / `PHASE_SIGN:` /
+    /// `PHASE_SEND:` markers from a diagnostic string before it is
+    /// shown to the user.
+    private static func stripPhaseTag(_ s: String) -> String {
+        var out = s
+        for tag in ["PHASE_NONCE:", "PHASE_SIGN:", "PHASE_SEND:"] {
+            out = out.replacingOccurrences(of: tag, with: "")
+        }
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Pull the on-chain transaction hash out of the JS bridge result

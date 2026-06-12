@@ -238,6 +238,217 @@ public final class JsBridge: @unchecked Sendable {
         }
     }
 
+    /// Split-flow part 1 (native coin): sign the transaction LOCALLY
+    /// and return the signed raw transaction string WITHOUT
+    /// broadcasting. The `nonce` is fetched NATIVELY by the caller
+    /// (see `fetchNonce`) and passed in, so this WebView call does NO
+    /// network - it is purely local WASM signing. (The in-WebView
+    /// `fetch` to the RPC stalls on device while native URLSession to
+    /// the same endpoint works; that is why nonce/broadcast moved
+    /// native.) The private key is staged on the binary channel
+    /// exactly like the all-in-one `sendTransaction`, so the same
+    /// tamper gate applies. The returned signed transaction is a
+    /// public artifact; broadcast it with `broadcastTransaction`.
+    /// Signing failures arrive phase-tagged `PHASE_SIGN:` from
+    /// `bridge.html#signCoinTransaction`.
+    public func signCoinTransaction(privKey: Data, pubKey: Data,
+        toAddress: String, valueWei: String,
+        gasLimit: String, rpcEndpoint: String,
+        chainId: Int, advancedSigningEnabled: Bool, nonce: Int) throws -> String {
+        try TamperGatePolicy.shared.assertSafeToSign()
+        // No `rpcEndpoint:` passed to `blockingCall`: signing is now
+        // fully local, so a stall here is local WASM signing, not a
+        // network round-trip - the RPC reachability probe would only
+        // mislead.
+        let envelope = try blockingCall(settleTimeout: Self.signingTimeoutSeconds,
+            label: "signCoinTransaction") { cb, rid in
+            try JsEngine.shared.storePendingPayloadBinary(
+                requestId: rid, key: "privKey", data: privKey)
+            try JsEngine.shared.storePendingPayloadBinary(
+                requestId: rid, key: "pubKey", data: pubKey)
+            let payload: [String: Any] = [
+                "to": toAddress,
+                "value": valueWei,
+                "gasLimit": gasLimit,
+                "rpcEndpoint": rpcEndpoint,
+                "chainId": chainId,
+                "advancedSigning": advancedSigningEnabled,
+                "nonce": nonce
+            ]
+            let json = try Self.jsonString(payload)
+            JsEngine.shared.registerCallback(requestId: rid, callback: cb)
+            try JsEngine.shared.storePendingPayload(requestId: rid, json: json)
+            JsEngine.shared.evaluate("bridge.signCoinTransaction('\(rid)')")
+        }
+        return try Self.parseSignedTx(envelope)
+    }
+
+    /// Split-flow part 1 (ERC-20 token): encode the transfer calldata
+    /// and sign LOCALLY, returning the signed raw transaction string
+    /// WITHOUT broadcasting. The `nonce` is supplied (fetched
+    /// natively); like `signCoinTransaction`, this WebView call does
+    /// no network. Same tamper gate / binary-channel handling.
+    /// Broadcast with `broadcastTransaction`.
+    public func signTokenTransaction(privKey: Data, pubKey: Data,
+        contractAddress: String, toAddress: String,
+        amountWei: String, gasLimit: String,
+        rpcEndpoint: String, chainId: Int,
+        advancedSigningEnabled: Bool, nonce: Int) throws -> String {
+        try TamperGatePolicy.shared.assertSafeToSign()
+        let envelope = try blockingCall(settleTimeout: Self.signingTimeoutSeconds,
+            label: "signTokenTransaction") { cb, rid in
+            try JsEngine.shared.storePendingPayloadBinary(
+                requestId: rid, key: "privKey", data: privKey)
+            try JsEngine.shared.storePendingPayloadBinary(
+                requestId: rid, key: "pubKey", data: pubKey)
+            let payload: [String: Any] = [
+                "contract": contractAddress,
+                "to": toAddress,
+                "amount": amountWei,
+                "gasLimit": gasLimit,
+                "rpcEndpoint": rpcEndpoint,
+                "chainId": chainId,
+                "advancedSigning": advancedSigningEnabled,
+                "nonce": nonce
+            ]
+            let json = try Self.jsonString(payload)
+            JsEngine.shared.registerCallback(requestId: rid, callback: cb)
+            try JsEngine.shared.storePendingPayload(requestId: rid, json: json)
+            JsEngine.shared.evaluate("bridge.signTokenTransaction('\(rid)')")
+        }
+        return try Self.parseSignedTx(envelope)
+    }
+
+    /// Split-flow part 2 (coin + token): broadcast a previously
+    /// signed raw transaction NATIVELY (URLSession
+    /// `eth_sendRawTransaction`) and return a result envelope shaped
+    /// like the JS bridge result so `SendViewController.parseTxHash`
+    /// works unchanged. Done natively (not via the WebView) for the
+    /// same reason as `fetchNonce`: the in-WebView `fetch` to the RPC
+    /// stalls on device while native HTTP succeeds. No key material is
+    /// involved - the signed transaction is a public artifact.
+    @discardableResult
+    public func broadcastTransaction(signedTx: String,
+        rpcEndpoint: String, chainId: Int) throws -> String {
+        let hash = try Self.rpcCall(method: "eth_sendRawTransaction",
+            params: [signedTx], rpcEndpoint: rpcEndpoint)
+        return try Self.jsonString(["txHash": hash])
+    }
+
+    /// Fetch the next nonce for `address` via a NATIVE URLSession
+    /// JSON-RPC call (`eth_getTransactionCount`, trying "pending" then
+    /// "latest"). Performed natively because the in-WebView `fetch` to
+    /// the RPC stalls on device (confirmed: native probe to the same
+    /// endpoint returns HTTP 200 in ~1.3s while the WebView call hangs
+    /// the full signing budget). Throws on network/parse failure so
+    /// the caller can show the dedicated nonce-fetch alert.
+    /// Must be called off the main thread (blocks on URLSession).
+    public func fetchNonce(address: String, rpcEndpoint: String,
+        chainId: Int) throws -> Int {
+        if let n = Self.parseHexQuantity(try Self.rpcCall(
+            method: "eth_getTransactionCount", params: [address, "pending"],
+            rpcEndpoint: rpcEndpoint)) {
+            return n
+        }
+        if let n = Self.parseHexQuantity(try Self.rpcCall(
+            method: "eth_getTransactionCount", params: [address, "latest"],
+            rpcEndpoint: rpcEndpoint)) {
+            return n
+        }
+        throw JsEngineError.callFailed("nonce: RPC result is not a hex quantity")
+    }
+
+    /// Synchronous native JSON-RPC POST helper used by `fetchNonce`
+    /// and `broadcastTransaction`. Blocks the calling (background)
+    /// thread on a semaphore, mirroring `probeRpcReachability`.
+    /// Returns the `result` string from the JSON-RPC envelope; throws
+    /// `JsEngineError.callFailed` on transport, HTTP, timeout, or
+    /// JSON-RPC `error` responses.
+    private static func rpcCall(method: String, params: [Any],
+        rpcEndpoint: String, timeout: TimeInterval = 30) throws -> String {
+        precondition(!Thread.isMainThread,
+            "Native RPC must not be invoked on the main thread")
+        let host = URL(string: rpcEndpoint)?.host ?? rpcEndpoint
+        guard let url = URL(string: rpcEndpoint) else {
+            throw JsEngineError.callFailed("invalid RPC endpoint")
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = timeout
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = [
+            "jsonrpc": "2.0", "id": 1, "method": method, "params": params
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let sem = DispatchSemaphore(value: 0)
+        var resultString: String?
+        var failure: String?
+        let task = URLSession.shared.dataTask(with: req) { data, response, error in
+            defer { sem.signal() }
+            if let error = error {
+                let ns = error as NSError
+                failure = "\(method): network error (\(ns.domain)#\(ns.code)) "
+                    + "to \(host)"
+                return
+            }
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            guard let data = data else {
+                failure = "\(method): empty response (HTTP \(code))"
+                return
+            }
+            guard let obj = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any] else {
+                failure = "\(method): unparseable response (HTTP \(code))"
+                return
+            }
+            if let err = obj["error"] as? [String: Any] {
+                let msg = (err["message"] as? String) ?? "\(err)"
+                failure = "\(method): RPC error: \(msg)"
+                return
+            }
+            if let r = obj["result"] as? String {
+                resultString = r
+                return
+            }
+            failure = "\(method): response missing result (HTTP \(code))"
+        }
+        task.resume()
+        if sem.wait(timeout: .now() + timeout + 2) == .timedOut {
+            task.cancel()
+            throw JsEngineError.callFailed(
+                "\(method): timed out after \(Int(timeout))s to \(host)")
+        }
+        if let failure = failure { throw JsEngineError.callFailed(failure) }
+        guard let resultString = resultString else {
+            throw JsEngineError.callFailed("\(method): no result")
+        }
+        return resultString
+    }
+
+    /// Parse an Ethereum-style hex quantity (e.g. "0x1a") into an Int.
+    private static func parseHexQuantity(_ hex: String) -> Int? {
+        var s = hex
+        if s.hasPrefix("0x") || s.hasPrefix("0X") { s = String(s.dropFirst(2)) }
+        if s.isEmpty { return nil }
+        return Int(s, radix: 16)
+    }
+
+    /// Extract the non-secret `data.signedTx` string from a
+    /// successful sign-call envelope.
+    private static func parseSignedTx(_ envelope: String) throws -> String {
+        guard let data = envelope.data(using: .utf8),
+        let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let inner = obj["data"] as? [String: Any],
+        let signed = inner["signedTx"] as? String,
+        !signed.isEmpty
+        else {
+            throw JsEngineError.callFailed(
+                "sign envelope missing signedTx")
+        }
+        return signed
+    }
+
     /// Internal helper used by every wallet-creation handler that
     /// returns a freshly-instantiated SDK wallet (`createRandom`,
     /// `walletFromSeed`, `walletFromPhrase`, `walletFromKeys`).
@@ -566,6 +777,17 @@ public final class JsBridge: @unchecked Sendable {
             var diagnostic = "\(tag) did not respond within "
                 + String(format: "%.0f", settleTimeout) + "s "
                 + "(waited " + String(format: "%.1f", elapsed) + "s)"
+            // Name the step the JS handler was executing when it
+            // stalled (reported via the always-on `stage` beacon). On a
+            // hard hang the per-step internal SDK timeouts (30s fetch,
+            // etc.) never fire, so this is the only signal that
+            // pinpoints WHICH step hung - e.g. "init (SDK/WASM)" vs
+            // "fetch nonce" vs "sign".
+            if let stage = JsEngine.shared.lastStage(requestId: requestId),
+            !stage.isEmpty {
+                diagnostic += ". Last step before stall: \(stage)"
+            }
+            JsEngine.shared.clearStage(requestId: requestId)
             // A signing stall is almost always the RPC round-trips
             // inside the send (populate nonce/gas, then broadcast),
             // not the local signing. Probe the endpoint so the alert
@@ -576,6 +798,7 @@ public final class JsBridge: @unchecked Sendable {
             Logger.debug(category: "BRIDGE_TIMING", "TIMED OUT: \(diagnostic)")
             throw JsEngineError.timeout(diagnostic)
         }
+        JsEngine.shared.clearStage(requestId: requestId)
         if !label.isEmpty {
             let elapsed = Date().timeIntervalSince(started)
             Logger.debug(category: "BRIDGE_TIMING",
@@ -829,6 +1052,53 @@ public extension JsBridge {
                 amountWei: amountWei, gasLimit: gasLimit,
                 rpcEndpoint: rpcEndpoint, chainId: chainId,
                 advancedSigningEnabled: advancedSigningEnabled)
+        }
+    }
+
+    @inlinable
+    func signCoinTransactionAsync(privKey: Data, pubKey: Data,
+        toAddress: String, valueWei: String,
+        gasLimit: String, rpcEndpoint: String,
+        chainId: Int, advancedSigningEnabled: Bool, nonce: Int) async throws -> String {
+        try await withDetachedThrowing {
+            try JsBridge.shared.signCoinTransaction(privKey: privKey, pubKey: pubKey,
+                toAddress: toAddress, valueWei: valueWei,
+                gasLimit: gasLimit, rpcEndpoint: rpcEndpoint,
+                chainId: chainId, advancedSigningEnabled: advancedSigningEnabled,
+                nonce: nonce)
+        }
+    }
+
+    @inlinable
+    func signTokenTransactionAsync(privKey: Data, pubKey: Data,
+        contractAddress: String, toAddress: String,
+        amountWei: String, gasLimit: String,
+        rpcEndpoint: String, chainId: Int,
+        advancedSigningEnabled: Bool, nonce: Int) async throws -> String {
+        try await withDetachedThrowing {
+            try JsBridge.shared.signTokenTransaction(privKey: privKey, pubKey: pubKey,
+                contractAddress: contractAddress, toAddress: toAddress,
+                amountWei: amountWei, gasLimit: gasLimit,
+                rpcEndpoint: rpcEndpoint, chainId: chainId,
+                advancedSigningEnabled: advancedSigningEnabled, nonce: nonce)
+        }
+    }
+
+    @inlinable
+    func fetchNonceAsync(address: String, rpcEndpoint: String,
+        chainId: Int) async throws -> Int {
+        try await withDetachedThrowing {
+            try JsBridge.shared.fetchNonce(address: address,
+                rpcEndpoint: rpcEndpoint, chainId: chainId)
+        }
+    }
+
+    @inlinable
+    func broadcastTransactionAsync(signedTx: String,
+        rpcEndpoint: String, chainId: Int) async throws -> String {
+        try await withDetachedThrowing {
+            try JsBridge.shared.broadcastTransaction(signedTx: signedTx,
+                rpcEndpoint: rpcEndpoint, chainId: chainId)
         }
     }
 
