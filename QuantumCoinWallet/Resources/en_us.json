@@ -219,6 +219,7 @@
       "i-agree-literal": "i agree",
       "must-agree-to-submit": "You have to agree to submit the transaction.",
       "decrypting-wallet": "Please wait while decrypting wallet...",
+      "signing-transaction": "Please wait while your transaction is being signed.",
       "submitting-transaction": "Please wait while your transaction is being submitted.",
       "transaction-sent": "Your transaction request has been sent.",
       "transaction-id": "Transaction ID",
@@ -257,6 +258,9 @@
       "network-duplicate-name": "A network named \"[NAME]\" already exists.",
       "network-secure-storage-unavailable": "Secure storage is unavailable; cannot save network.",
       "network-add-success": "Added successfully!",
-      "reveal-wallet-error-generic": "Unable to reveal the wallet. Please check your password and try again."
+      "reveal-wallet-error-generic": "Unable to reveal the wallet. Please check your password and try again.",
+      "nonce-fetch-failed": "Couldn't fetch your account details from the network. Check your connection and try again.",
+      "signing-failed": "Signing the transaction failed.",
+      "submit-failed": "Couldn't submit the transaction to the network. Check your connection and try again."
     }
 }

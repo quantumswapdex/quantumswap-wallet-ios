@@ -88,6 +88,20 @@ public final class JsEngine: NSObject {
     private nonisolated(unsafe) let lastFailureLock = NSLock()
     private nonisolated(unsafe) var _lastFailure: String?
 
+    /// Most recent progress "stage" reported by a long-running JS
+    /// handler (the send path), keyed by requestId. The JS side
+    /// calls `AndroidBridge.stage(rid, name)` (always-on, NOT
+    /// debug-gated) BEFORE entering each step, so on a hard hang the
+    /// blocking caller's settle-timeout can read the last reported
+    /// step for that rid and name it in the user-facing alert
+    /// (e.g. "init (SDK/WASM)" vs "fetch nonce" vs "sign"). Same
+    /// `nonisolated(unsafe)` + NSLock discipline as `_lastFailure`:
+    /// the message handler writes from the main actor while the
+    /// blocking caller reads from a background thread, and every
+    /// access goes through `stageLock`.
+    private nonisolated(unsafe) let stageLock = NSLock()
+    private nonisolated(unsafe) var _stageByRid: [String: String] = [:]
+
     // MARK: - Init
 
     private override init() {
@@ -130,6 +144,32 @@ public final class JsEngine: NSObject {
         _lastFailure = description
         lastFailureLock.unlock()
         readyLatch.signal()
+    }
+
+    /// Record the step a JS handler is about to enter. Called from the
+    /// `stage` message route. Safe from any thread.
+    fileprivate nonisolated func recordStage(requestId: String, stage: String) {
+        guard !requestId.isEmpty else { return }
+        stageLock.lock()
+        _stageByRid[requestId] = stage
+        stageLock.unlock()
+    }
+
+    /// Last step reported for `requestId`, or `nil` if none. Read by
+    /// the blocking caller's timeout path to name the stalled step.
+    nonisolated func lastStage(requestId: String) -> String? {
+        stageLock.lock(); defer { stageLock.unlock() }
+        return _stageByRid[requestId]
+    }
+
+    /// Drop the stored stage for `requestId` once the call settles
+    /// (success, failure, or timeout) so the map cannot grow without
+    /// bound.
+    nonisolated func clearStage(requestId: String) {
+        guard !requestId.isEmpty else { return }
+        stageLock.lock()
+        _stageByRid.removeValue(forKey: requestId)
+        stageLock.unlock()
     }
 
     /// Fire-and-forget JavaScript evaluation, main-thread safe.
@@ -365,6 +405,15 @@ public final class JsEngine: NSObject {
                     // even when the overall bridge call later times out.
                     post('debugLog', [String(msg || '')]);
                 },
+                stage: function (requestId, name) {
+                    // Always-on progress beacon (NOT gated by isDebug).
+                    // The JS send path calls this BEFORE each step with
+                    // an opaque step label so the native side can name
+                    // the stalled step in the user-facing alert if the
+                    // overall call later times out. Carries no payload-
+                    // derived data.
+                    post('stage', [String(requestId || ''), String(name || '')]);
+                },
                 onResult: function (requestId, jsonResult) {
                     post('onResult', [String(requestId || ''), String(jsonResult || '')]);
                 },
@@ -587,6 +636,12 @@ private final class ScriptMessageBroker: NSObject, WKScriptMessageHandler {
             // route is inert outside DEBUG builds.
             guard let line = args.first else { return }
             Logger.debug(category: "BRIDGE_TIMING", line)
+            case "stage":
+            // Always-on progress beacon from a long-running JS handler.
+            // Stored per requestId so the blocking caller's timeout
+            // path can name the stalled step in the user-facing alert.
+            guard args.count >= 2 else { return }
+            owner.recordStage(requestId: args[0], stage: args[1])
             case "onResult":
             guard args.count >= 2 else { return }
             MainActor.assumeIsolated {

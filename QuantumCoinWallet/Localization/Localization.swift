@@ -275,6 +275,10 @@ public final class Localization {
     public func getIAgreeLiteralByLangValues() -> String { langString("i-agree-literal") }
     public func getMustAgreeToSubmitByLangValues() -> String { langString("must-agree-to-submit") }
     public func getDecryptingWalletByLangValues() -> String { langString("decrypting-wallet") }
+    /// Progress copy for the local-signing step of the two-phase
+    /// send (sign locally, then broadcast). Shown before
+    /// `submitting-transaction`.
+    public func getSigningTransactionByLangValues() -> String { langString("signing-transaction") }
     public func getSubmittingTransactionByLangValues() -> String { langString("submitting-transaction") }
     public func getTransactionSentByLangValues() -> String { langString("transaction-sent") }
     public func getTransactionIdByLangValues() -> String { langString("transaction-id") }
@@ -341,4 +345,12 @@ public final class Localization {
     /// password decrypts the slot but key derivation does not yield a
     /// usable wallet entry.
     public func getRevealWalletErrorGenericByErrors() -> String { errString("reveal-wallet-error-generic") }
+    /// Phase-specific copy for the two-phase send flow so the user
+    /// learns which step failed: fetching account details (nonce)
+    /// from the network, signing the transaction locally, or
+    /// broadcasting it to the network. See
+    /// `SendViewController.presentPhaseError`.
+    public func getNonceFetchFailedByErrors() -> String { errString("nonce-fetch-failed") }
+    public func getSigningFailedByErrors() -> String { errString("signing-failed") }
+    public func getSubmitFailedByErrors() -> String { errString("submit-failed") }
 }

@@ -110,6 +110,25 @@ function _timeLog(tag) {
  } catch (_) {}
 }
 
+// Always-on (NOT debug-gated) progress beacon for the long send
+// path. Reports the step a handler is ABOUT to enter to the native
+// side, which stores it per requestId. Unlike `_timeLog` (which
+// logs each step's duration only AFTER it completes, and only in
+// DEBUG), this fires BEFORE each step, so on a hard hang the outer
+// Swift settle-timeout can read the last reported step and name it
+// in the user-facing alert - pinpointing whether the stall was the
+// SDK/WASM bring-up, the nonce fetch, or the local signing, even in
+// Release and without pulling device logs. Carries only an opaque
+// step label; never any payload-derived data.
+function _stage(requestId, name) {
+ try {
+ if (typeof AndroidBridge !== 'undefined'
+ && typeof AndroidBridge.stage === 'function') {
+ AndroidBridge.stage(requestId, name);
+ }
+ } catch (_) {}
+}
+
 function bytesToBase64(bytes) {
  var binary = '';
  for (var i = 0; i < bytes.length; i++) {
@@ -256,6 +275,19 @@ function sendError(requestId, error) {
  console.error('BRIDGE_ERR [' + _categorize(message) + '] req=' + requestId);
  }
  AndroidBridge.onResult(requestId, JSON.stringify({ success: false, error: message }));
+}
+
+// Wrap a phase-specific failure so the Swift side can tell the
+// user WHICH step failed: fetching the account nonce ('NONCE'),
+// signing the transaction locally ('SIGN'), or broadcasting it
+// ('SEND'). The phase travels as a `PHASE_<NAME>:` prefix on the
+// error message because the bridge error channel (`sendError` ->
+// onResult envelope) carries only a single string. The Swift
+// caller strips the prefix and maps it to a localized,
+// user-facing alert. See `JsBridge`/`SendViewController`.
+function _phaseError(phase, e) {
+ var m = (e && e.message) ? e.message : String(e);
+ return new Error('PHASE_' + phase + ':' + m);
 }
 
 function requireSDK(requestId) {
@@ -658,6 +690,182 @@ var bridge = {
  } finally {
  if (privBytes) { try { privBytes.fill(0); } catch (_) {} }
  if (pubBytes) { try { pubBytes.fill(0); } catch (_) {} }
+ }
+ },
+
+// Split-flow native-coin signing (part 1 of 2). Populates the
+// nonce from the RPC and signs LOCALLY, returning the signed raw
+// transaction string WITHOUT broadcasting. The nonce is supplied
+// explicitly so `signTransaction` does no network I/O - that
+// keeps the 'SIGN' phase purely local, so a network failure
+// while fetching the nonce surfaces as the distinct 'NONCE'
+// phase rather than being mislabeled as a signing failure. The
+// broadcast is performed separately by `broadcastTransaction`.
+// Mirrors the desktop wallet's `OfflineSignCoinTransaction`
+// (src/index.js) plus an explicit nonce fetch.
+ signCoinTransaction: async function(requestId) {
+ var payload = null;
+ var privBytes = null;
+ var pubBytes = null;
+ try {
+ var _t0 = _now();
+ if (!requireSDK(requestId)) return;
+ payload = pullPayload(requestId);
+ if (!payload) return;
+ _stage(requestId, 'init (SDK/WASM)');
+ await ensureConfigured(payload.chainId, payload.rpcEndpoint);
+ _timeLog('signCoin.init=' + Math.round(_now() - _t0) + 'ms req=' + requestId);
+ var _t1 = _now();
+ var provider = new QuantumCoinSDK.JsonRpcProvider(
+ payload.rpcEndpoint, payload.chainId);
+ privBytes = pullPayloadBinary(requestId, 'privKey');
+ pubBytes = pullPayloadBinary(requestId, 'pubKey');
+ _stage(requestId, 'load keys');
+ var wallet = await QuantumCoinSDK.Wallet.fromKeys(privBytes, pubBytes, provider);
+ _timeLog('signCoin.fromKeys=' + Math.round(_now() - _t1) + 'ms');
+ var _t2 = _now();
+ var signingContext = wallet.getSigningContext(payload.advancedSigning === true);
+ _timeLog('signCoin.getSigningContext=' + Math.round(_now() - _t2) + 'ms');
+ // Nonce is fetched NATIVELY (the in-WebView RPC fetch stalls on
+ // device while native URLSession to the same endpoint works) and
+ // supplied in the payload, so this signing path does NO network -
+ // it is purely local WASM signing.
+ var nonce = Number(payload.nonce);
+ var signed;
+ var _t4 = _now();
+ _stage(requestId, 'sign');
+ try {
+ signed = await wallet.signTransaction({
+ to: payload.to,
+ value: BigInt(payload.value),
+ gasLimit: Number(payload.gasLimit),
+ nonce: nonce,
+ chainId: payload.chainId,
+ signingContext: signingContext
+ });
+ } catch (eSign) {
+ throw _phaseError('SIGN', eSign);
+ }
+ _timeLog('signCoin.signTransaction(local)=' + Math.round(_now() - _t4)
+ + 'ms total=' + Math.round(_now() - _t0) + 'ms');
+ sendResult(requestId, { signedTx: signed });
+ } catch (e) {
+ sendError(requestId, e);
+ } finally {
+ if (privBytes) { try { privBytes.fill(0); } catch (_) {} }
+ if (pubBytes) { try { pubBytes.fill(0); } catch (_) {} }
+ }
+ },
+
+// Split-flow ERC-20 token signing (part 1 of 2). Encodes the
+// `transfer(to, amount)` calldata via `populateTransaction`
+// (local), populates the nonce from the RPC, then signs LOCALLY,
+// returning the signed raw transaction string WITHOUT
+// broadcasting. Same phase tagging as `signCoinTransaction`:
+// calldata-encode and local sign are 'SIGN'; the nonce fetch is
+// 'NONCE'. Mirrors the desktop wallet's
+// `OfflineSignTokenTransaction` (src/index.js).
+ signTokenTransaction: async function(requestId) {
+ var payload = null;
+ var privBytes = null;
+ var pubBytes = null;
+ try {
+ var _t0 = _now();
+ if (!requireSDK(requestId)) return;
+ if (!QuantumCoinSDK.IERC20) {
+ sendError(requestId, new Error(
+ 'IERC20 is not exposed by QuantumCoinSDK bundle'));
+ return;
+ }
+ payload = pullPayload(requestId);
+ if (!payload) return;
+ _stage(requestId, 'init (SDK/WASM)');
+ await ensureConfigured(payload.chainId, payload.rpcEndpoint);
+ _timeLog('signToken.init=' + Math.round(_now() - _t0) + 'ms req=' + requestId);
+ var _t1 = _now();
+ var provider = new QuantumCoinSDK.JsonRpcProvider(
+ payload.rpcEndpoint, payload.chainId);
+ privBytes = pullPayloadBinary(requestId, 'privKey');
+ pubBytes = pullPayloadBinary(requestId, 'pubKey');
+ _stage(requestId, 'load keys');
+ var wallet = await QuantumCoinSDK.Wallet.fromKeys(privBytes, pubBytes, provider);
+ _timeLog('signToken.fromKeys=' + Math.round(_now() - _t1) + 'ms');
+ var _t2 = _now();
+ var signingContext = wallet.getSigningContext(payload.advancedSigning === true);
+ _timeLog('signToken.getSigningContext=' + Math.round(_now() - _t2) + 'ms');
+ var txReq;
+ var _t3 = _now();
+ _stage(requestId, 'encode transfer');
+ try {
+ var token = QuantumCoinSDK.IERC20.connect(payload.contract, wallet);
+ txReq = await token.populateTransaction.transfer(
+ payload.to, BigInt(payload.amount), {
+ gasLimit: Number(payload.gasLimit),
+ signingContext: signingContext
+ });
+ } catch (eEncode) {
+ throw _phaseError('SIGN', eEncode);
+ }
+ _timeLog('signToken.populateTransfer=' + Math.round(_now() - _t3) + 'ms');
+ // Nonce fetched NATIVELY and supplied in the payload (see
+ // signCoinTransaction note); signing does no network.
+ var nonce = Number(payload.nonce);
+ var signed;
+ var _t5 = _now();
+ _stage(requestId, 'sign');
+ try {
+ signed = await wallet.signTransaction(Object.assign({}, txReq, {
+ nonce: nonce,
+ chainId: payload.chainId,
+ signingContext: signingContext
+ }));
+ } catch (eSign) {
+ throw _phaseError('SIGN', eSign);
+ }
+ _timeLog('signToken.signTransaction(local)=' + Math.round(_now() - _t5)
+ + 'ms total=' + Math.round(_now() - _t0) + 'ms');
+ sendResult(requestId, { signedTx: signed });
+ } catch (e) {
+ sendError(requestId, e);
+ } finally {
+ if (privBytes) { try { privBytes.fill(0); } catch (_) {} }
+ if (pubBytes) { try { pubBytes.fill(0); } catch (_) {} }
+ }
+ },
+
+// Split-flow broadcast (part 2 of 2 for both coin and token).
+// Takes the signed raw transaction produced by
+// `signCoinTransaction` / `signTokenTransaction` and broadcasts
+// it via the provider (`eth_sendRawTransaction`), returning the
+// on-chain hash. NO private-key material is involved - the
+// signed transaction is a public artifact - so this handler
+// pulls no binary key slots. Any failure here is the 'SEND'
+// phase, surfaced to the user as a submission failure.
+ broadcastTransaction: async function(requestId) {
+ var payload = null;
+ try {
+ var _t0 = _now();
+ if (!requireSDK(requestId)) return;
+ payload = pullPayload(requestId);
+ if (!payload) return;
+ _stage(requestId, 'init (SDK/WASM)');
+ await ensureConfigured(payload.chainId, payload.rpcEndpoint);
+ _timeLog('broadcast.init=' + Math.round(_now() - _t0) + 'ms req=' + requestId);
+ var provider = new QuantumCoinSDK.JsonRpcProvider(
+ payload.rpcEndpoint, payload.chainId);
+ var tx;
+ var _t1 = _now();
+ _stage(requestId, 'broadcast');
+ try {
+ tx = await provider.sendTransaction(payload.signedTx);
+ } catch (eSend) {
+ throw _phaseError('SEND', eSend);
+ }
+ _timeLog('broadcast.sendTransaction=' + Math.round(_now() - _t1)
+ + 'ms total=' + Math.round(_now() - _t0) + 'ms');
+ sendResult(requestId, { txHash: tx.hash });
+ } catch (e) {
+ sendError(requestId, e);
  }
  },
 
