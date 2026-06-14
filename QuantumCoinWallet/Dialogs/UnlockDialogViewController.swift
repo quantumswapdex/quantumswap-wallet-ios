@@ -56,12 +56,14 @@ UIAdaptivePresentationControllerDelegate {
         super.viewDidLoad()
 
         // MARK: - Keychain autofill (strongbox unlock)
-        // Pairs `.password` (existingPassword) with a hidden
+        // Pairs `.password` (existingPassword) with an imperceptible
         // `.username` field carrying
-        // `CredentialIdentifier.strongboxUsername`. iOS QuickType will
-        // offer the saved strongbox password for THIS device only -
-        // per-device username scoping prevents another device's
-        // synced strongbox password from being autofilled here.
+        // `CredentialIdentifier.strongboxUsername`, placed immediately
+        // above the password field in the SAME stack (see
+        // UsernameField.make). iOS QuickType will offer the saved
+        // strongbox password for THIS device only - per-device
+        // username scoping prevents another device's synced strongbox
+        // password from being autofilled here.
         // Save behavior: NONE. `.existingPassword` is fill-only;
         // iOS will not prompt to save what the user types. The
         // strongbox credential can only be written by the create-
@@ -112,14 +114,13 @@ UIAdaptivePresentationControllerDelegate {
         buttonRow.distribution = .fillEqually
         buttonRow.spacing = 12
 
-        // The hidden username field is placed immediately above the
-        // password field so iOS's autofill heuristic pairs them in
-        // the same vertical group; it has alpha=0 so it consumes
-        // no visual space.
         let stack = UIStackView(arrangedSubviews: [titleLabel, degradedBanner, usernameField, passwordField, errorLabel, buttonRow])
         stack.axis = .vertical
         stack.spacing = 14
         stack.translatesAutoresizingMaskIntoConstraints = false
+        // Collapse the gap after the imperceptible username field so it
+        // adds no visible space above the password field.
+        stack.setCustomSpacing(0, after: usernameField)
         card.addSubview(stack)
         NSLayoutConstraint.activate([
                 stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 20),

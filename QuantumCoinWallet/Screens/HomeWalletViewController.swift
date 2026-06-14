@@ -245,8 +245,13 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         let title = makeTitle(L.getSetWalletPasswordByLangValues())
         let hint = makeBody(L.getUseStrongPasswordByLangValues())
         // MARK: - Keychain autofill (strongbox create-wallet)
-        // Pairs `.newPassword` (twice: pw + rt) with a hidden
-        // `.username` carrying `CredentialIdentifier.strongboxUsername`.
+        // Pairs `.newPassword` (twice: pw + rt) with an imperceptible
+        // `.username` carrying `CredentialIdentifier.strongboxUsername`,
+        // placed immediately above the password field in the SAME
+        // stack (see UsernameField.make). That adjacency is what lets
+        // iOS AutoFill detect the username/password pair, which makes
+        // iOS proactively offer "Use Strong Password" here AND makes
+        // the saved username be strongboxUsername instead of blank.
         // After the user submits this step iOS may show "Save
         // Password as QuantumCoin-<deviceSuffix>?". Saving is
         // OPT-IN: dismissing the sheet writes nothing to Keychain
@@ -260,6 +265,12 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
             CredentialIdentifier.strongboxUsername)
         let pw = makeSecureField(placeholder: L.getPasswordByLangValues(), purpose: .newPassword)
         let rt = makeSecureField(placeholder: L.getRetypePasswordByLangValues(), purpose: .newPassword)
+        // When iOS AutoFill populates the password (an existing-
+        // credential pick fills only the focused field, not the
+        // retype), mirror the value into the retype field so the
+        // confirm check passes. Paste is intentionally NOT mirrored
+        // (see PasswordTextField.onAutoFill).
+        pw.onAutoFill = { [weak rt] value in rt?.text = value }
         let err = makeErrorLabel()
         let next = makeNextButton()
         next.addAction(UIAction(handler: { [weak self] _ in
@@ -287,6 +298,10 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
                 }
             }), for: .touchUpInside)
         [title, hint, usernameField, pw, rt, err, wrapPrimaryRight(next)].forEach { contentStack.addArrangedSubview($0) }
+        // Collapse the stack gap after the imperceptible username field
+        // so it adds no visible space between `hint` and the password
+        // field while still sitting adjacent to it for AutoFill.
+        contentStack.setCustomSpacing(0, after: usernameField)
         ModalDialogViewController.focusAndShowKeyboard(pw.underlyingTextField)
     }
 

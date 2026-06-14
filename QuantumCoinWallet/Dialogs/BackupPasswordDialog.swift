@@ -27,6 +27,14 @@ public final class BackupPasswordDialog: ModalDialogViewController {
     public var onSubmit: ((String) -> Void)?
     public var onCancel: (() -> Void)?
 
+    /// How the currently-entered password was produced (typed,
+    /// pasted, or AutoFilled). Read by `RestoreFlow` on a failed
+    /// decrypt pass to choose a Passwords-app-specific hint when the
+    /// value came from AutoFill.
+    public var passwordInputSource: PasswordTextField.InputSource {
+        passwordField.lastInputSource
+    }
+
     private let mode: Mode
     private let titleLabel = UILabel()
     private let subtitleLabel = UILabel()
@@ -64,11 +72,12 @@ public final class BackupPasswordDialog: ModalDialogViewController {
         // `backupBatchUsername` instead of `strongboxUsername`. The
         // prefix (`QuantumCoin-backup-...`) is what isolates these
         // slots from the strongbox slot in the iOS Keychain.
-        // Every mode prepends the same hidden `.username` field
-        // (alpha 0, height 0, non-interactive) above the password
-        // field; the modes differ only in which
-        // `CredentialIdentifier` accessor supplies the value and
-        // in which `Purpose` the password field gets:
+        // Every mode installs the same off-screen `.username` field
+        // (non-interactive, parked off the screen edge so AutoFill
+        // still detects it) alongside the password field; the modes
+        // differ only in which `CredentialIdentifier` accessor
+        // supplies the value and in which `Purpose` the password
+        // field gets:
         // .create(address) -> .newPassword on both pw +
         // confirm; username from
         // backupUsername(address:).
@@ -137,11 +146,11 @@ public final class BackupPasswordDialog: ModalDialogViewController {
             ])
         addressScroll.isHidden = true
 
-        // Hidden `.username` field inserted above the password
-        // field; every mode produces one but with different
-        // `CredentialIdentifier` values per the per-mode wiring
+        // Off-screen `.username` field (installed after the visible
+        // stack, see below); every mode supplies a different
+        // `CredentialIdentifier` value per the per-mode wiring
         // documented in the MARK block above.
-        let usernameRow: UITextField
+        let usernameValue: String
         switch mode {
             case .create(let address):
             titleLabel.text = L.getBackupPasswordByLangValues()
@@ -157,15 +166,13 @@ public final class BackupPasswordDialog: ModalDialogViewController {
             // after submit.
             passwordField.setPurpose(.newPassword)
             confirmField.setPurpose(.newPassword)
-            usernameRow = UsernameField.make(
-                CredentialIdentifier.backupUsername(address: address))
+            usernameValue = CredentialIdentifier.backupUsername(address: address)
             case .restoreSingle(let address):
             titleLabel.text = L.getEnterBackupPasswordTitleByLangValues()
             subtitleLabel.text = address
             confirmField.isHidden = true
             passwordField.setPurpose(.existingPassword)
-            usernameRow = UsernameField.make(
-                CredentialIdentifier.backupUsername(address: address))
+            usernameValue = CredentialIdentifier.backupUsername(address: address)
             case .restoreBatch(let addresses):
             titleLabel.text = L.getEnterBackupPasswordTitleByLangValues()
             // Header line above the list. The localization value is the
@@ -191,8 +198,7 @@ public final class BackupPasswordDialog: ModalDialogViewController {
             // after the decryption attempt succeeds, so use the
             // address-less `backupBatchUsername` to avoid colliding
             // with the per-address `.create` / `.restoreSingle` slots.
-            usernameRow = UsernameField.make(
-                CredentialIdentifier.backupBatchUsername)
+            usernameValue = CredentialIdentifier.backupBatchUsername
         }
 
         // Trailing-aligned intrinsic-width pills with a leading spacer.
@@ -205,6 +211,14 @@ public final class BackupPasswordDialog: ModalDialogViewController {
         buttons.distribution = .fill
         buttons.alignment = .center
 
+        // Imperceptible `.username` field placed immediately above the
+        // password field in the SAME stack so iOS AutoFill can detect
+        // it: detection scopes the Save (`.create`) / fill (restore) to
+        // the per-mode Keychain account and, for `.create`, lets iOS
+        // offer Strong Password generation. (A field parked off-screen
+        // or alpha-0 / 0-height is ignored by AutoFill - see
+        // UsernameField.make.)
+        let usernameRow = UsernameField.make(usernameValue)
         let stack = UIStackView(arrangedSubviews: [
                 titleLabel, subtitleLabel, addressScroll,
                 usernameRow, passwordField, confirmField, errorLabel, buttons
@@ -212,6 +226,9 @@ public final class BackupPasswordDialog: ModalDialogViewController {
         stack.axis = .vertical
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
+        // Collapse the gap after the imperceptible username field so it
+        // adds no visible space above the password field.
+        stack.setCustomSpacing(0, after: usernameRow)
         card.addSubview(stack)
         NSLayoutConstraint.activate([
                 stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 20),
@@ -220,6 +237,15 @@ public final class BackupPasswordDialog: ModalDialogViewController {
                 stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
                 card.widthAnchor.constraint(equalToConstant: 340)
             ])
+
+        // When iOS AutoFill populates the backup password on `.create`
+        // (an existing-credential pick fills only the focused field),
+        // mirror it into the confirm field so the match check passes.
+        // Paste is intentionally NOT mirrored (see
+        // PasswordTextField.onAutoFill).
+        passwordField.onAutoFill = { [weak self] value in
+            self?.confirmField.text = value
+        }
 
         // Apply alpha-dim press feedback to OK / Cancel and the
         // password fields' eye toggles.

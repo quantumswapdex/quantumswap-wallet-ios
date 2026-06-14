@@ -44,6 +44,7 @@ signed transaction is reproducible across both clients.
 - [Feature list](#feature-list)
 - [Security & durability features](#security--durability-features)
 - [Strongbox cryptographic specification](#strongbox-cryptographic-specification)
+- [Password entry and iOS AutoFill](#password-entry-and-ios-autofill)
 - [Cross-platform interoperability](#cross-platform-interoperability)
 - [SDKs and dependencies](#sdks-and-dependencies)
 - [Architecture overview](#architecture-overview)
@@ -198,12 +199,15 @@ signed transaction is reproducible across both clients.
   in **full byte-identity parity** with the Android wallet's
   `app/src/main/res/raw/en_us.json` (every Android error key is
   present on iOS with the same English text); the
-  `langValues` catalog matches Android verbatim. The only
+  `langValues` catalog matches Android verbatim. The
   iOS-only keys are `emptyPassword` (shown when the user
   submits an empty unlock field; Android has no equivalent
-  state) and `wallet-data-unreadable` (the friendly
+  state), `wallet-data-unreadable` (the friendly
   tamper-detected message surfaced on a hard strongbox read
-  failure).
+  failure), and `restore-try-different-password-autofill`
+  (shown when a backup restore fails on a password that was
+  AutoFilled from the iOS Passwords app — see [Password entry
+  and iOS AutoFill](#password-entry-and-ios-autofill)).
 - VoiceOver / accessibility deliberately disabled on the four
   seed-handling surfaces (reveal, new-seed, verify, restore) so
   the seed words are never read aloud (`Screens/HomeWalletViewController.swift`).
@@ -691,6 +695,128 @@ nonce, `WalletEntryCodec`, canonical `StrongboxPayload` bytes,
 the keyed inner checksum, and 4 MiB ISO/IEC 7816-4 padding. Large
 payload JSON and full slot blobs are generated from the seed
 inside the tests rather than checked into the repository.
+
+---
+
+## Password entry and iOS AutoFill
+
+Every password the user enters — the strongbox unlock password, a
+new strongbox password at create-wallet time, and per-wallet backup
+file passwords — flows through one reusable component,
+[`Components/PasswordTextField.swift`](QuantumCoinWallet/Components/PasswordTextField.swift).
+That single owner is what lets the app cooperate with the iOS
+Passwords app (QuickType / iCloud Keychain) without ever calling a
+`SecItem` API itself: **iOS owns the save and autofill UI
+end-to-end**, and the app only supplies the semantic hints iOS needs
+to behave correctly. No extra entitlements or `Info.plist` keys are
+required, and the user can opt out at any time (decline the system
+"Save Password?" sheet, pick a different saved password from the
+QuickType key icon, or disable *Settings → Passwords → AutoFill
+Passwords* for the app).
+
+### Field purpose (fill vs. create)
+
+`PasswordTextField.Purpose` maps a semantic intent onto the iOS
+`textContentType`, keeping the distinction grep-able from one switch:
+
+| Purpose | `textContentType` | iOS behavior |
+| --- | --- | --- |
+| `.existingPassword` | `.password` | May offer to **autofill** a previously-saved entry; never prompts to **save**. Used by unlock and by backup **restore**. |
+| `.newPassword` | `.newPassword` | May offer **Strong Password** generation in the QuickType bar and, after submit, presents the system "Save Password as `<username>`?" sheet (still opt-in). Used **only** at credential-creation moments — strongbox create-wallet and backup `.create`. |
+
+For `.newPassword`, the field also advertises
+`UITextInputPasswordRules(descriptor: "minlength: 12; allowed: ascii-printable;")`
+so any iOS-generated strong password already satisfies the app's
+validation (`Constants.MINIMUM_PASSWORD_LENGTH == 12`, ASCII-only).
+
+### Username scoping (Keychain account isolation)
+
+iOS only proactively offers strong-password generation, and only
+scopes a saved credential to the right Keychain account, when a
+`.username` field sits next to the password field **in the same
+visible container**. The app supplies one via
+[`UsernameField.make(_:)`](QuantumCoinWallet/Components/CredentialIdentifier.swift),
+whose value comes from `CredentialIdentifier` (never typed by the
+user) and encodes three isolation guarantees:
+
+| Context | Username shape |
+| --- | --- |
+| Strongbox unlock / create | `QuantumCoin-<deviceSuffix>` |
+| Per-wallet backup (`.create` / `.restoreSingle`) | `QuantumCoin-backup-<address>-<deviceSuffix>` |
+| Batch restore (`.restoreBatch`) | `QuantumCoin-backup-<deviceSuffix>` |
+
+- **Context isolation** — distinct strongbox vs. backup prefixes mean
+  a save in one context can never overwrite the other's slot.
+- **Per-wallet isolation** — the wallet `<address>` in the backup
+  username keeps wallet `0xABC`'s backup password from overwriting
+  `0xDEF`'s.
+- **Cross-device isolation** — `<deviceSuffix>` is derived from
+  `UIDevice.identifierForVendor` (with a `WhenUnlockedThisDeviceOnly`
+  Keychain UUID fallback), so even with iCloud Keychain sync each
+  device queries with its own suffix and never silently overwrites
+  another device's saved password.
+
+The username field is a real, non-hidden field rendered
+**imperceptibly** (clear text/tint/background, 1 pt height,
+`isUserInteractionEnabled = false`) and inserted directly above the
+password field with the stack spacing zeroed after it. This is
+deliberate: iOS AutoFill heuristics ignore fields that are
+`isHidden`, `alpha = 0`, or zero-height, and they pair username with
+password **by proximity** in the view hierarchy — a field parked
+off-screen or in a different container is never associated, and the
+proactive strong-password offer never fires.
+
+### Confirm-field mirroring (autofill only, not paste)
+
+When the user picks an **existing** credential, iOS fills the
+password field but not the paired "Retype / Confirm" field. To avoid
+a confusing mismatch error, `PasswordTextField` exposes
+`onAutoFill`, which the create-wallet screen
+([`Screens/HomeWalletViewController.swift`](QuantumCoinWallet/Screens/HomeWalletViewController.swift))
+and the backup `.create` dialog
+([`Dialogs/BackupPasswordDialog.swift`](QuantumCoinWallet/Dialogs/BackupPasswordDialog.swift))
+use to mirror the autofilled value into the confirm field.
+
+Mirroring is deliberately **not** triggered by a user-initiated
+paste, so the confirm field keeps its typo safety-net for a
+hand-entered password. The distinction is drawn by
+`PasteAwareTextField`, a `UITextField` subclass that flags
+`didPaste` inside its `paste(_:)` override; both autofill and paste
+arrive as a single multi-character replacement in
+`textField(_:shouldChangeCharactersIn:replacementString:)`, but only
+paste routes through `paste(_:)`.
+
+### Autofill-aware restore failure message
+
+The same hook records how the current value was produced via
+`PasswordTextField.InputSource` (`.typed` / `.pasted` /
+`.autoFilled`), surfaced on the dialog as `passwordInputSource`. When
+a backup restore decrypts no wallet
+([`Backup/RestoreFlow.swift`](QuantumCoinWallet/Backup/RestoreFlow.swift)),
+the error message branches:
+
+- `.autoFilled` → `restore-try-different-password-autofill`, which
+  guides the user to manually pick the correct **backup** password
+  from the Passwords app (iOS may have surfaced the app/strongbox
+  password, which is not a backup password).
+- `.typed` / `.pasted` → the existing generic
+  `restore-try-different-password` message.
+
+In either case the field value is preserved for retry. If a future
+iOS build were to set the value without routing through
+`shouldChangeCharactersIn`, `lastInputSource` safely stays `.typed`
+and the generic message is shown.
+
+### Scope notes
+
+- Seed-phrase restore has no Passwords-app password and is
+  unaffected by any of the above.
+- The strongbox password and a backup-file password are independent
+  and may legitimately differ; the username scoping above is what
+  keeps their Keychain slots from colliding.
+- These behaviors require iCloud Keychain to be enabled on the
+  device; with AutoFill off, the fields behave as plain secure text
+  fields.
 
 ---
 

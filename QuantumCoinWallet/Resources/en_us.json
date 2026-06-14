@@ -172,6 +172,7 @@
       "restore-summary-status-skipped": "Skipped",
       "restore-summary-status-already-exists": "Already exists",
       "restore-try-different-password": "Unable to decrypt any wallet with that password. Try with a different password.",
+      "restore-try-different-password-autofill": "None of the wallets could be decrypted with that autofilled password. You may need to manually select the correct backup password from the Passwords app. To do so, tap the key icon in the keyboard bar and choose the correct backup password from your saved passwords, or type it in.",
       "restore-strongbox-write-failed": "The backup file decrypted successfully, but it could not be saved to your device's wallet store. The wallet password you entered earlier does not match the password protecting this device. Cancel and start the restore again, then enter the device wallet password when asked.",
       "restore-progress-of": "[CURRENT] of [TOTAL]",
       "restore-partial-progress": "[COUNT] wallet(s) were restored. Enter password for the remaining.",

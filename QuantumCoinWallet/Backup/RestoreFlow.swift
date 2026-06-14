@@ -779,9 +779,18 @@ public final class RestoreFlow {
                 // error, then re-enable the dialog so the user can fix
                 // one character and retry without losing their typed
                 // password.
+                // When the failed password was AutoFilled from the iOS
+                // Passwords app, guide the user to manually pick the
+                // correct backup credential (iOS likely surfaced the
+                // app/strongbox password, which is not a backup
+                // password). Typed/pasted values keep the generic
+                // "try a different password" message.
+                let failMessage = dialog.passwordInputSource == .autoFilled
+                ? Localization.shared.getRestoreTryDifferentPasswordAutofillByLangValues()
+                : Localization.shared.getRestoreTryDifferentPasswordByLangValues()
                 self.showRestoreError(
                     over: dialog,
-                    message: Localization.shared.getRestoreTryDifferentPasswordByLangValues()
+                    message: failMessage
                 ) {
                     dialog.reEnable(withError: nil)
                 }
