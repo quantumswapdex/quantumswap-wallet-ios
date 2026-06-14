@@ -197,15 +197,28 @@ enum UsernameField {
     /// Build a `UITextField` whose only job is to carry an
     /// iOS-known `.username` value next to a paired password
     /// field, so iOS can scope autofill / save to a specific
-    /// Keychain account. The returned field is invisible to the
-    /// user (alpha 0, non-interactive, height 0) - it exists
-    /// purely to satisfy the iOS autofill heuristic, which
-    /// requires a `.username` field somewhere in the same view
-    /// hierarchy as the `.password` field. The value is computed
-    /// from `CredentialIdentifier`, never typed by the user. See
-    /// `CredentialIdentifier`'s file header for the security
-    /// rationale (CONTEXT / PER-WALLET / CROSS-DEVICE isolation)
-    /// behind the values passed here.
+    /// Keychain account AND so iOS classifies a `.newPassword`
+    /// screen as account-creation (which is what makes it
+    /// proactively offer "Use Strong Password"). The value is
+    /// computed from `CredentialIdentifier`, never typed by the
+    /// user. See `CredentialIdentifier`'s file header for the
+    /// security rationale (CONTEXT / PER-WALLET / CROSS-DEVICE
+    /// isolation) behind the values passed here.
+    /// IMPORTANT: this field MUST stay detectable by iOS AutoFill, and
+    /// it must sit in the SAME visible container as (immediately above)
+    /// the password field - iOS pairs username/password by proximity in
+    /// the view hierarchy, so a field parked off-screen or in a
+    /// different container (e.g. outside the password field's scroll
+    /// view) is not associated and the proactive strong-password offer
+    /// never fires. `isHidden = true`, `alpha = 0`, and a `0`-height /
+    /// zero-size frame are also each treated by the heuristic as
+    /// hidden. So instead of hiding the field, we keep it on (alpha 1,
+    /// not hidden) but visually imperceptible via clear text / tint /
+    /// background colors at a 1pt height, and `isUserInteractionEnabled
+    /// = false` so the user can never focus or read it. Callers insert
+    /// the returned field directly above the password field in the same
+    /// UIStackView and zero the stack spacing after it so it adds no
+    /// visible gap.
     static func make(_ value: String) -> UITextField {
         let f = UITextField()
         f.text = value
@@ -219,21 +232,18 @@ enum UsernameField {
         f.autocapitalizationType = .none
         f.autocorrectionType = .no
         f.translatesAutoresizingMaskIntoConstraints = false
-        // `isHidden = true` makes iOS ignore the field entirely
-        // (defeating autofill). alpha = 0 keeps it in the layer
-        // tree where the autofill heuristic can still find it,
-        // while userInteractionEnabled = false guarantees the
-        // user can never tap it or read its accessibility label.
+        // Imperceptible-but-detectable: clear colors + 1pt height keep
+        // the field invisible to the user while remaining a real,
+        // non-hidden, non-zero-size field that AutoFill will pair with
+        // the adjacent password field. (Do NOT use isHidden / alpha 0 /
+        // 0-height - AutoFill ignores those.)
+        f.textColor = .clear
+        f.tintColor = .clear
+        f.backgroundColor = .clear
+        f.borderStyle = .none
         f.isAccessibilityElement = false
-        f.alpha = 0
         f.isUserInteractionEnabled = false
-        // Collapse to 0pt so the field consumes no visual space
-        // inside a UIStackView (the field still exists in the
-        // view hierarchy, which is all the autofill heuristic
-        // needs). Required priority so the stack honors it;
-        // intrinsic content size of UITextField would otherwise
-        // inject ~30pt of unwanted gap above the password field.
-        f.heightAnchor.constraint(equalToConstant: 0).isActive = true
+        f.heightAnchor.constraint(equalToConstant: 1).isActive = true
         return f
     }
 }

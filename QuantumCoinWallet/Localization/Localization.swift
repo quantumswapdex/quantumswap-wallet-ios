@@ -196,6 +196,7 @@ public final class Localization {
     public func getRestoreSummaryStatusSkippedByLangValues() -> String { langString("restore-summary-status-skipped") }
     public func getRestoreSummaryStatusAlreadyExistsByLangValues() -> String { langString("restore-summary-status-already-exists") }
     public func getRestoreTryDifferentPasswordByLangValues() -> String { langString("restore-try-different-password") }
+    public func getRestoreTryDifferentPasswordAutofillByLangValues() -> String { langString("restore-try-different-password-autofill") }
     public func getRestoreStrongboxWriteFailedByLangValues() -> String { langString("restore-strongbox-write-failed") }
     public func getRestoreProgressOfByLangValues() -> String { langString("restore-progress-of") }
     public func getRestorePartialProgressByLangValues() -> String { langString("restore-partial-progress") }

@@ -71,6 +71,25 @@ public final class PasswordTextField: UIView {
 
     public var onReturn: (() -> Void)?
 
+    /// Fired when iOS Password AutoFill inserts a value into this field
+    /// (a strong-password generation or an existing-credential pick) so
+    /// callers can mirror it into a paired confirm/retype field, which
+    /// iOS does not fill on its own when an existing credential is
+    /// selected. Deliberately NOT fired for user-initiated paste (see
+    /// `PasteAwareTextField`) so the confirm field keeps its
+    /// wrong-value safety net for the wallet password. The argument is
+    /// the full resulting field text.
+    public var onAutoFill: ((String) -> Void)?
+
+    /// How the field's current value was most recently produced.
+    /// Drives context-specific messaging - e.g. the restore flow
+    /// shows a "manually pick the correct backup password" hint only
+    /// when the failed password was `.autoFilled`. Updated on every
+    /// edit in the delegate's `shouldChangeCharactersIn`; programmatic
+    /// `text = ...` writes do not change it (they bypass the delegate).
+    public enum InputSource { case typed, pasted, autoFilled }
+    public private(set) var lastInputSource: InputSource = .typed
+
     /// Mirrors `UITextField.becomeFirstResponder` so callers can
     /// re-focus after a failed attempt without reaching into the
     /// internal `UITextField`.
@@ -106,8 +125,8 @@ public final class PasswordTextField: UIView {
     /// `BackupPasswordDialog.viewDidLoad` switching on `Mode`).
     private var purpose: Purpose
 
-    private let field: UITextField = {
-        let tf = UITextField()
+    private let field: PasteAwareTextField = {
+        let tf = PasteAwareTextField()
         tf.borderStyle = .roundedRect
         tf.isSecureTextEntry = true
         tf.autocapitalizationType = .none
@@ -217,8 +236,20 @@ public final class PasswordTextField: UIView {
     /// single grep target across the codebase.
     private func applyPurpose() {
         switch purpose {
-            case .existingPassword: field.textContentType = .password
-            case .newPassword: field.textContentType = .newPassword
+            case .existingPassword:
+            field.textContentType = .password
+            // Fill-only context: no generation, so no rules to advertise.
+            field.passwordRules = nil
+            case .newPassword:
+            field.textContentType = .newPassword
+            // Constrain iOS Strong Password generation so the proposed
+            // password always satisfies the app's validation
+            // (`Constants.MINIMUM_PASSWORD_LENGTH` == 12, no leading/
+            // trailing whitespace). `ascii-printable` keeps the
+            // generator within characters the wallet's password
+            // handling accepts.
+            field.passwordRules = UITextInputPasswordRules(
+                descriptor: "minlength: 12; allowed: ascii-printable;")
         }
     }
 
@@ -255,5 +286,63 @@ extension PasswordTextField: UITextFieldDelegate {
     public func textFieldShouldReturn(_ textField: UITextField) -> Bool {
         onReturn?()
         return true
+    }
+
+    /// Detect an iOS Password AutoFill insertion and surface it via
+    /// `onAutoFill` so a paired confirm/retype field can be mirrored.
+    /// AutoFill (strong-password generation or existing-credential
+    /// pick) and paste both arrive as a single multi-character
+    /// replacement, but only user-initiated paste routes through
+    /// `PasteAwareTextField.paste(_:)`, which sets `didPaste`. We
+    /// therefore mirror only when the bulk insert is NOT a paste.
+    /// Single-character typing (`string.count <= 1`) never triggers
+    /// the mirror, preserving manual typo-protection. Programmatic
+    /// `field.text = ...` (clear / eye toggle / the mirror's own
+    /// write) does not call this method, so there is no recursion.
+    public func textField(_ textField: UITextField,
+        shouldChangeCharactersIn range: NSRange,
+        replacementString string: String) -> Bool {
+        let isBulkInsert = string.count > 1
+        if isBulkInsert {
+            if field.didPaste {
+                // User-initiated paste (long-press "Paste" / Cmd-V).
+                lastInputSource = .pasted
+            } else {
+                // Bulk insert that is not a paste == iOS AutoFill.
+                lastInputSource = .autoFilled
+                let current = textField.text ?? ""
+                let result = (current as NSString)
+                .replacingCharacters(in: range, with: string)
+                onAutoFill?(result)
+            }
+        } else {
+            // Single-character insert or a deletion: manual typing/edit.
+            lastInputSource = .typed
+        }
+        return true
+    }
+}
+
+// MARK: - PasteAwareTextField
+
+/// `UITextField` subclass that flags user-initiated paste so
+/// `PasswordTextField` can distinguish a paste from an iOS Password
+/// AutoFill insertion. User paste (long-press "Paste" / Cmd-V) routes
+/// through `paste(_:)`; AutoFill does not. The flag is set just before
+/// the paste mutates the text and cleared on the next runloop tick,
+/// so it is `true` only for the synchronous
+/// `shouldChangeCharactersIn` callback the paste triggers.
+final class PasteAwareTextField: UITextField {
+
+    private(set) var didPaste = false
+
+    override func paste(_ sender: Any?) {
+        didPaste = true
+        super.paste(sender)
+        // Reset after the paste's change cycle so the next AutoFill
+        // insertion is not misclassified as a paste.
+        DispatchQueue.main.async { [weak self] in
+            self?.didPaste = false
+        }
     }
 }
