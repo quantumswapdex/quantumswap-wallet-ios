@@ -1,17 +1,17 @@
-# XcodeGen spec for the iOS clone of the Quantum Coin Wallet.
+# XcodeGen spec for the iOS QuantumSwap wallet.
 #
 # Build:
 #   brew install xcodegen
 #   cd ios
 #   xcodegen generate
-#   open QuantumCoinWallet.xcodeproj
+#   open QuantumSwapWallet.xcodeproj
 #
 # The generated .xcodeproj is intentionally not committed - regenerate from
 # this spec on macOS so the project is always in sync with the source tree.
 
-name: QuantumCoinWallet
+name: QuantumSwapWallet
 options:
-  bundleIdPrefix: org.quantumcoin
+  bundleIdPrefix: org.quantumswap
   deploymentTarget:
     iOS: "15.0"
   minimumXcodeGenVersion: "2.38.0"
@@ -31,12 +31,12 @@ settings:
     SUPPORTS_MACCATALYST: NO
 
 targets:
-  QuantumCoinWallet:
+  QuantumSwapWallet:
     type: application
     platform: iOS
     # Regenerate `Generated/BundleHash_Generated.swift`
     # at the start of every build so the embedded SHA-256 always
-    # matches the shipping `quantumcoin-bundle.js`. The generated
+    # matches the shipping `quantumswap-bundle.js`. The generated
     # constant is consumed by `BundleIntegrity.verifyOrFail` at
     # boot (AppDelegate) and at WKURLSchemeHandler serving time
     # (defense-in-depth). Out-of-date hashes are impossible by
@@ -49,36 +49,43 @@ targets:
         shell: /bin/bash
         runOnlyWhenInstalling: false
         inputFiles:
-          - $(SRCROOT)/QuantumCoinWallet/Resources/quantumcoin-bundle.js
+          - $(SRCROOT)/QuantumSwapWallet/Resources/quantumswap-bundle.js
         outputFiles:
-          - $(SRCROOT)/QuantumCoinWallet/Generated/BundleHash_Generated.swift
+          - $(SRCROOT)/QuantumSwapWallet/Generated/BundleHash_Generated.swift
         basedOnDependencyAnalysis: true
     sources:
-      - path: QuantumCoinWallet
+      - path: QuantumSwapWallet
         excludes:
           - "**/*.md"
           # INFOPLIST_FILE + info.path already own Info.plist; including it
           # here adds Copy Bundle Resources and causes "Multiple commands produce
-          # .../QuantumCoinWallet.app/Info.plist" on modern Xcode.
+          # .../QuantumSwapWallet.app/Info.plist" on modern Xcode.
           - Info.plist
     resources:
-      - path: QuantumCoinWallet/Resources
+      - path: QuantumSwapWallet/Resources
         buildPhase: resources
-      - path: QuantumCoinWallet/Assets.xcassets
+      - path: QuantumSwapWallet/Assets.xcassets
         buildPhase: resources
-      - path: QuantumCoinWallet/LaunchScreen.storyboard
+      - path: QuantumSwapWallet/LaunchScreen.storyboard
         buildPhase: resources
     info:
-      path: QuantumCoinWallet/Info.plist
+      path: QuantumSwapWallet/Info.plist
       properties:
-        CFBundleDisplayName: "Quantum Wallet"
+        CFBundleDisplayName: "QuantumSwap"
         # Required by App Store validation (asset catalog set name).
         CFBundleIconName: "AppIcon"
-        CFBundleName: "QuantumCoinWallet"
+        CFBundleName: "QuantumSwapWallet"
         CFBundleShortVersionString: "3.5"
         CFBundleVersion: "3.5"
         UIApplicationSupportsIndirectInputEvents: true
         UILaunchStoryboardName: "LaunchScreen"
+        UIUserInterfaceStyle: Dark
+        UIAppFonts:
+          - Fonts/Poppins-Regular.ttf
+          - Fonts/Poppins-Medium.ttf
+          - Fonts/Poppins-SemiBold.ttf
+          - Fonts/Poppins-Bold.ttf
+          - Fonts/Poppins-Light.ttf
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         UISupportedInterfaceOrientations~ipad:
@@ -90,12 +97,12 @@ targets:
         NSCameraUsageDescription: >-
           Camera access is used to scan QR codes when entering a recipient
           wallet address.
-        # Both flags disabled so the QuantumCoin
+        # Both flags disabled so the QuantumSwap
         # folder no longer appears in iOS Files / iTunes / Finder.
         # The app does NOT write user-visible files to its sandbox
         # `Documents/` directory (verified by `rg
         # "documentDirectory|applicationSupportDirectory|cachesDirectory"
-        # QuantumCoinWallet/`):
+        # QuantumSwapWallet/`):
         #   - Encrypted prefs / strongbox: `Application Support/`
         #   - Staged backup exports: `tmp/<csprng>/qcw-backup-...`
         #   - User-picked backup writes: arrive via
@@ -152,13 +159,13 @@ targets:
         # this WebView, re-enable the policy AND populate this key
         # with real public-suffix-list hostnames (NOT scheme names).
         CFBundleDocumentTypes:
-          - CFBundleTypeName: "Quantum Coin Wallet"
+          - CFBundleTypeName: "QuantumSwap Wallet"
             LSHandlerRank: "Owner"
-            LSItemContentTypes: ["org.quantumcoin.wallet"]
+            LSItemContentTypes: ["org.quantumswap.wallet"]
             CFBundleTypeRole: "Viewer"
         UTExportedTypeDeclarations:
-          - UTTypeIdentifier: "org.quantumcoin.wallet"
-            UTTypeDescription: "Quantum Coin Wallet backup"
+          - UTTypeIdentifier: "org.quantumswap.wallet"
+            UTTypeDescription: "QuantumSwap Wallet backup"
             UTTypeConformsTo: ["public.data"]
             UTTypeTagSpecification:
               "public.filename-extension": ["wallet"]
@@ -183,27 +190,27 @@ targets:
               NSIncludesSubdomains: false
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: org.quantumcoin.wallet
-        INFOPLIST_FILE: QuantumCoinWallet/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: org.quantumswap.wallet
+        INFOPLIST_FILE: QuantumSwapWallet/Info.plist
         # Merged into the built Info.plist (belt-and-suspenders with the
         # committed Info.plist); avoids App Store 90713 if a build phase
         # ever strips plist keys.
         INFOPLIST_KEY_CFBundleIconName: AppIcon
-        CODE_SIGN_ENTITLEMENTS: QuantumCoinWallet/QuantumCoinWallet.entitlements
+        CODE_SIGN_ENTITLEMENTS: QuantumSwapWallet/QuantumSwapWallet.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         DEVELOPMENT_TEAM: ""
         CODE_SIGN_STYLE: Automatic
 
-  QuantumCoinWalletTests:
+  QuantumSwapWalletTests:
     type: bundle.unit-test
     platform: iOS
-    sources: [QuantumCoinWalletTests]
+    sources: [QuantumSwapWalletTests]
     dependencies:
-      - target: QuantumCoinWallet
+      - target: QuantumSwapWallet
     settings:
       base:
         BUNDLE_LOADER: "$(TEST_HOST)"
-        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/QuantumCoinWallet.app/QuantumCoinWallet"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/QuantumSwapWallet.app/QuantumSwapWallet"
         # XcodeGen does not auto-generate an Info.plist for
         # unit-test bundles by default; opt in to the
         # auto-generation so we don't have to commit a separate
@@ -211,14 +218,14 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
 
 schemes:
-  QuantumCoinWallet:
+  QuantumSwapWallet:
     build:
       targets:
-        QuantumCoinWallet: all
-        QuantumCoinWalletTests: [test]
+        QuantumSwapWallet: all
+        QuantumSwapWalletTests: [test]
     test:
       commandLineArguments:
         "-com.apple.CoreData.ConcurrencyDebug 1": true
       gatherCoverageData: true
       targets:
-        - QuantumCoinWalletTests
+        - QuantumSwapWalletTests

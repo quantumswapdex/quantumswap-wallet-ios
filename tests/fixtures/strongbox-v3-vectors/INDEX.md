@@ -12,7 +12,7 @@ The expansion rule is:
 
 `SHAKE256(seed || UTF8(label), outputLength)`
 
-iOS implements this in `QuantumCoinWalletTests/StrongboxLayerTests.swift`
+iOS implements this in `QuantumSwapWalletTests/StrongboxLayerTests.swift`
 as `TestShake256`; Android implements it in
 `app/src/test/java/com/quantumcoin/app/strongbox/StrongboxPortabilityVectorTest.java`
 through BouncyCastle `SHAKEDigest(256)`.
