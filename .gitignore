@@ -12,7 +12,7 @@
 # -----------------------------------------------------------------------------
 *.xcodeproj/
 *.xcworkspace/
-scripts/
+
 # -----------------------------------------------------------------------------
 # Xcode user / build artifacts
 # -----------------------------------------------------------------------------
@@ -77,7 +77,19 @@ fastlane/test_output
 *.p8
 *.pem
 *.cer
+*.key
+*.der
+*.crt
 *.certSigningRequest
+*.xcarchive
+
+# Local environment and secret configuration
+.env
+.env.*
+!.env.example
+.xcode.env.local
+Secrets.xcconfig
+*.local.xcconfig
 
 # -----------------------------------------------------------------------------
 # OS / editor cruft
@@ -101,6 +113,9 @@ Thumbs.db
 # Test / coverage output
 # -----------------------------------------------------------------------------
 *.xcresult/
+*.xccovarchive
+*.xccovreport
+*.profdata
 coverage/
 *.gcda
 *.gcno
