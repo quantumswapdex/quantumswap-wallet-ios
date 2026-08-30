@@ -37,7 +37,11 @@ HomeScreenViewTypeProviding {
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
+        // Transparent so HomeViewController's AmbientBackgroundView
+        // (Android body_ambient: violet / cyan orbs over #050508)
+        // shows through the whole screen instead of being blacked
+        // out by an opaque fill.
+        view.backgroundColor = .clear
 
         scroll.translatesAutoresizingMaskIntoConstraints = false
         contentStack.axis = .vertical
@@ -327,7 +331,7 @@ HomeScreenViewTypeProviding {
         let b = UIButton(type: .system)
         b.setTitle(shortAddress(address), for: .normal)
         b.titleLabel?.font = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        b.setTitleColor(UIColor(named: "colorCommonSeedA") ?? UIColor.systemBlue, for: .normal)
+        b.setTitleColor(UIColor(rgbHex: 0x9B73FF), for: .normal)
         b.titleLabel?.lineBreakMode = .byTruncatingMiddle
         b.titleLabel?.numberOfLines = 1
         b.addAction(UIAction(handler: { [weak self] _ in
@@ -399,7 +403,7 @@ HomeScreenViewTypeProviding {
         let b = UIButton(type: .system)
         b.setTitle(Localization.shared.getCreateRestoreWalletByLangValues(), for: .normal)
         b.titleLabel?.font = Typography.mediumLabel(16)
-        b.setTitleColor(UIColor(named: "colorCommonSeedA") ?? UIColor.systemBlue, for: .normal)
+        b.setTitleColor(UIColor(rgbHex: 0x9B73FF), for: .normal)
         b.translatesAutoresizingMaskIntoConstraints = false
         b.addAction(UIAction(handler: { [weak self] _ in
                 (self?.parent as? HomeViewController)?.showCreateOrRestore()

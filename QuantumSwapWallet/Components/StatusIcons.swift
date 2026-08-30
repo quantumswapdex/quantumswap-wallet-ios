@@ -26,6 +26,28 @@ public enum StatusIcons {
         }.withRenderingMode(.alwaysOriginal)
     }
 
+    /// Android `alert_outline.xml` (ion alert): pure-red #FF0000
+    /// exclamation - rounded bar + dot - used by the transactions
+    /// table's failed marker. The stroked r16 dot at 32 stroke in the
+    /// Android vector renders as a solid 32pt-radius disc, so it is
+    /// drawn as a filled circle here.
+    public static func alertOutline(size: CGFloat = 22) -> UIImage {
+        UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { ctx in
+            let c = ctx.cgContext
+            let s = size / 512
+            c.scaleBy(x: s, y: s)
+            let red = UIColor(rgbHex: 0xFF0000)
+            c.setStrokeColor(red.cgColor)
+            c.setFillColor(red.cgColor)
+            c.setLineWidth(32)
+            c.setLineCap(.round)
+            c.move(to: CGPoint(x: 256, y: 96))
+            c.addLine(to: CGPoint(x: 256, y: 312))
+            c.strokePath()
+            c.fillEllipse(in: CGRect(x: 224, y: 368, width: 64, height: 64))
+        }.withRenderingMode(.alwaysOriginal)
+    }
+
     /// Exclamation bar + dot, failure red #FF5A64.
     public static func failed(size: CGFloat = 30) -> UIImage {
         UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { ctx in

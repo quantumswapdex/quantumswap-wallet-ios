@@ -347,10 +347,12 @@ public final class JsBridge: @unchecked Sendable {
         "swapGetAmountsIn",
         "swapCheckAllowance",
         "swapSubmitApproval",
-        "swapSubmitSwap",
+        "swapSubmitSwap", "swapSubmitWrap", "swapSubmitUnwrap",
         "liquidityListPools",
         "liquidityListPositions",
+        "liquidityListPairsCreated",
         "liquidityGetPairInfo",
+        "swapApiStatus",
         "liquidityCheckAllowance",
         "liquiditySubmitApprove",
         "liquiditySubmitAdd",
@@ -370,7 +372,7 @@ public final class JsBridge: @unchecked Sendable {
     /// the default 30s).
     private static let dexSubmitMethods: Set<String> = [
         "swapSubmitApproval",
-        "swapSubmitSwap",
+        "swapSubmitSwap", "swapSubmitWrap", "swapSubmitUnwrap",
         "liquiditySubmitApprove",
         "liquiditySubmitAdd",
         "liquiditySubmitRemove",

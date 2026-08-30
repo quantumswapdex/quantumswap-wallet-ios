@@ -10,7 +10,11 @@ public final class AdvancedViewController: UIViewController, HomeScreenViewTypeP
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
+        // Transparent so HomeViewController's AmbientBackgroundView
+        // (Android body_ambient: violet / cyan orbs over #050508)
+        // shows through the whole screen instead of being blacked
+        // out by an opaque fill.
+        view.backgroundColor = .clear
         let L = Localization.shared
 
         let backBar = makeBackBar(action: #selector(tapBack))
@@ -34,20 +38,15 @@ public final class AdvancedViewController: UIViewController, HomeScreenViewTypeP
             showBottomDivider: false)
 
         let stack = UIStackView(arrangedSubviews: [
-            backBar, title, titleRule, tokens, liquidity, pools
+            title, titleRule, tokens, liquidity, pools
         ])
         stack.axis = .vertical
         stack.spacing = 0
-        stack.setCustomSpacing(8, after: backBar)
         stack.setCustomSpacing(8, after: title)
         stack.setCustomSpacing(8, after: titleRule)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16)
-        ])
+        // Android parity: back arrow above the 22pt gradient card
+        // (center_container screen shell; content is short, no scroll).
+        ScreenCard.installUnscrolled(in: view, backBar: backBar, content: stack)
         view.installPressFeedbackRecursive()
     }
 
@@ -161,15 +160,56 @@ enum DexScreenChrome {
     static func makeField(placeholder: String,
         keyboard: UIKeyboardType = .decimalPad) -> UITextField {
         let f = UITextField()
-        f.placeholder = placeholder
+        f.attributedPlaceholder = hintAttributed(placeholder, font: Typography.body(15))
         f.font = Typography.body(15)
         f.textColor = UIColor(named: "colorCommon6") ?? .label
-        f.borderStyle = .roundedRect
+        // Android parity: EditTexts use text_input_selector - no box,
+        // just a bottom hairline (see applyUnderline).
+        f.borderStyle = .none
+        applyUnderline(to: f)
         f.keyboardType = keyboard
         f.autocapitalizationType = .none
         f.autocorrectionType = .no
         f.heightAnchor.constraint(equalToConstant: 40).isActive = true
         return f
+    }
+
+    /// Android `text_input_selector` look: no box chrome, just a
+    /// 0.5pt bottom hairline in colorCommon6 (#E0E0E6). Works for
+    /// UITextField and UITextView alike.
+    static func applyUnderline(to control: UIView) {
+        (control as? UITextField)?.borderStyle = .none
+        control.layer.borderWidth = 0
+        control.layer.cornerRadius = 0
+        control.backgroundColor = .clear
+        let hairline = UIView()
+        hairline.backgroundColor = UIColor(named: "colorCommon6") ?? .separator
+        hairline.translatesAutoresizingMaskIntoConstraints = false
+        control.addSubview(hairline)
+        NSLayoutConstraint.activate([
+            hairline.leadingAnchor.constraint(equalTo: control.leadingAnchor),
+            hairline.trailingAnchor.constraint(equalTo: control.trailingAnchor),
+            hairline.bottomAnchor.constraint(equalTo: control.bottomAnchor),
+            hairline.heightAnchor.constraint(equalToConstant: 0.5)
+        ])
+    }
+
+    /// Placeholder / hint text in Android colorMutedSecondaryText.
+    static func hintAttributed(_ text: String, font: UIFont) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [
+            .font: font,
+            .foregroundColor: UIColor(rgbHex: 0x9A9AA6)
+        ])
+    }
+
+    /// Android `spinner_dropdown_background`: 6pt radius, transparent
+    /// fill, 1pt colorCommon6 border. Used for dropdown-style buttons
+    /// (Send asset picker, TokenCreate decimals).
+    static func applySpinnerBorder(to control: UIView) {
+        control.backgroundColor = .clear
+        control.layer.cornerRadius = 6
+        control.layer.borderWidth = 1
+        control.layer.borderColor = (UIColor(named: "colorCommon6") ?? .separator).cgColor
     }
 
     static func currentWalletAddress() -> String {

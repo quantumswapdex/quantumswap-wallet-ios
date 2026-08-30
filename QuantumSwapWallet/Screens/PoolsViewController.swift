@@ -18,7 +18,7 @@ public final class PoolsViewController: UIViewController, HomeScreenViewTypeProv
     private let listPanel = UIStackView()
     private let formPanel = UIStackView()
     private let poolsStack = UIStackView()
-    private let poolsScroll = MaxHeightScrollView()
+    private let poolsScroll = AutoHorizontalScrollView()
     private let emptyLabel = UILabel()
     private let statusLabel = UILabel()
     private let spinner = UIActivityIndicatorView(style: .medium)
@@ -30,7 +30,11 @@ public final class PoolsViewController: UIViewController, HomeScreenViewTypeProv
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
+        // Transparent so HomeViewController's AmbientBackgroundView
+        // (Android body_ambient: violet / cyan orbs over #050508)
+        // shows through the whole screen instead of being blacked
+        // out by an opaque fill.
+        view.backgroundColor = .clear
         let L = Localization.shared
         walletAddress = DexScreenChrome.currentWalletAddress()
 
@@ -50,29 +54,30 @@ public final class PoolsViewController: UIViewController, HomeScreenViewTypeProv
         refresh.tintColor = UIColor(named: "colorCommon6") ?? .label
         refresh.addTarget(self, action: #selector(loadPools), for: .touchUpInside)
         spinner.hidesWhenStopped = true
-        let header = UIStackView(arrangedSubviews: [listTitle, UIView(), refresh, spinner])
+        // "Create Pair" lives at the top right of the box (next to
+        // the refresh icon) so it is reachable without scrolling to
+        // the bottom of the pool list.
+        let createLink = DexScreenChrome.makeLink(L.lang("create-pair", fallback: "Create Pair"),
+                                                  underline: true, target: self, action: #selector(showCreatePanel))
+        let header = UIStackView(arrangedSubviews: [listTitle, UIView(), createLink, refresh, spinner])
         header.axis = .horizontal
         header.alignment = .center
         header.spacing = 8
 
         emptyLabel.text = L.lang("no-pools", fallback: "No pools yet.")
         emptyLabel.font = Typography.body(13)
-        emptyLabel.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
+        emptyLabel.textColor = UIColor(rgbHex: 0x9A9AA6) // Android colorMutedSecondaryText
 
         poolsStack.axis = .vertical
         poolsStack.spacing = 4
         poolsScroll.install(content: poolsStack)
+        // Cap so the card bottom border stays on screen; overflow
+        // scrolls vertically inside the box.
         poolsScroll.capToScreen(reserveBelow: 70)
-
-        let createLink = DexScreenChrome.makeLink(L.lang("create-pair", fallback: "Create Pair"),
-                                                  underline: true, target: self, action: #selector(showCreatePanel))
-        let linkRow = UIStackView(arrangedSubviews: [UIView(), createLink, UIView()])
-        linkRow.axis = .horizontal
-        linkRow.distribution = .equalCentering
 
         listPanel.axis = .vertical
         listPanel.spacing = 10
-        [header, emptyLabel, poolsScroll, linkRow].forEach { listPanel.addArrangedSubview($0) }
+        [header, emptyLabel, poolsScroll].forEach { listPanel.addArrangedSubview($0) }
 
         // ---- Form panel -------------------------------------------------
         let createTitle = UILabel()
@@ -94,12 +99,15 @@ public final class PoolsViewController: UIViewController, HomeScreenViewTypeProv
         tokenBPicker.onChanged = { [weak self] in self?.scheduleGasEstimate() }
         createButton.setTitle(L.lang("create-pair", fallback: "Create Pair"), for: .normal)
         createButton.addTarget(self, action: #selector(startCreate), for: .touchUpInside)
+        // Same footprint as the Send screen's primary button.
+        createButton.heightAnchor.constraint(equalToConstant: 43).isActive = true
+        createButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
         let createRow = UIStackView(arrangedSubviews: [UIView(), createButton, UIView()])
         createRow.axis = .horizontal
         createRow.distribution = .equalCentering
 
         statusLabel.font = Typography.body(12)
-        statusLabel.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
+        statusLabel.textColor = UIColor(rgbHex: 0xFBBF24) // Android quantumAmber
         statusLabel.numberOfLines = 0
         statusLabel.isHidden = true
 
@@ -111,26 +119,22 @@ public final class PoolsViewController: UIViewController, HomeScreenViewTypeProv
          DexScreenChrome.makeLabel(L.lang("token-b", fallback: "Token B")), tokenBPicker,
          statusLabel, createRow].forEach { formPanel.addArrangedSubview($0) }
 
-        let content = UIStackView(arrangedSubviews: [backBar, title, DexScreenChrome.makeDivider(), listPanel, formPanel])
+        let content = UIStackView(arrangedSubviews: [title, DexScreenChrome.makeDivider(), listPanel, formPanel])
         content.axis = .vertical
         content.spacing = 10
-        content.setCustomSpacing(8, after: backBar)
 
         let scroll = UIScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        content.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scroll)
-        scroll.addSubview(content)
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            content.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 8),
-            content.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 16),
-            content.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -16),
-            content.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -24)
+            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+        // Android parity: back arrow above the 22pt gradient card,
+        // both scrolling together (center_container screen shell).
+        ScreenCard.install(in: scroll, backBar: backBar, content: content)
 
         Task { [weak self] in
             guard let self else { return }
@@ -180,12 +184,27 @@ public final class PoolsViewController: UIViewController, HomeScreenViewTypeProv
 
     // MARK: - Pool list
 
+    // Web app poolExplorer: server pages of 20 with a sort toggle and a
+    // "Load all pairs" action when the Swap Read API serves the release.
+    private var poolsPage = 1
+    private var poolsSort = "liquidity"
+    private var poolsAll = false
+
     @objc private func loadPools() {
+        loadPoolsPage(page: poolsPage, all: poolsAll)
+    }
+
+    private func loadPoolsPage(page: Int, all: Bool) {
         setBusy(true)
+        let sort = poolsSort
         Task { [weak self] in
             guard let self else { return }
             do {
-                let json = try await JsBridge.shared.dexCallAsync(method: "liquidityListPools", payload: DexPayloads.base())
+                var payload = DexPayloads.base()
+                payload["page"] = page
+                payload["sort"] = sort
+                if all { payload["all"] = true }
+                let json = try await JsBridge.shared.dexCallAsync(method: "liquidityListPools", payload: payload)
                 let data = try DexBridgeResult.unwrapData(json)
                 let pools: [[String: Any]] = {
                     if let arr = data["pools"] as? [[String: Any]] { return arr }
@@ -194,7 +213,7 @@ public final class PoolsViewController: UIViewController, HomeScreenViewTypeProv
                 }()
                 await MainActor.run {
                     self.setBusy(false)
-                    self.renderPools(pools)
+                    self.renderPools(pools, meta: data)
                 }
             } catch {
                 await MainActor.run { self.failFlow("\(error)") }
@@ -202,7 +221,103 @@ public final class PoolsViewController: UIViewController, HomeScreenViewTypeProv
         }
     }
 
-    private func renderPools(_ pools: [[String: Any]]) {
+    private func renderPools(_ pools: [[String: Any]], meta: [String: Any]) {
+        let L = Localization.shared
+        let api = (meta["source"] as? String) == "api"
+        func num(_ key: String, _ fallback: Int) -> Int {
+            (meta[key] as? NSNumber)?.intValue ?? fallback
+        }
+        poolsPage = max(1, num("page", 1))
+        let pageCount = num("pageCount", 1)
+        let total = num("totalItems", pools.count)
+        renderPoolRows(pools)
+        emptyLabel.text = api
+            ? L.lang("pools-empty-api", fallback: "No pools found yet. Try loading all pairs, or create one.")
+            : L.lang("no-pools", fallback: "No pools yet.")
+        guard api else { return }
+        poolsStack.insertArrangedSubview(buildPoolsToolbar(indexedBlock: num("indexedBlock", 0)), at: 0)
+        poolsScroll.isHidden = false
+        if !poolsAll, pageCount > 1 {
+            poolsStack.addArrangedSubview(buildPager(page: poolsPage, pageCount: pageCount, total: total))
+        }
+    }
+
+    /// "Indexed at block N" + sort toggle + "Load all pairs".
+    private func buildPoolsToolbar(indexedBlock: Int) -> UIView {
+        let L = Localization.shared
+        let indexed = UILabel()
+        indexed.text = L.lang("pools-indexed-at", fallback: "Indexed at block [BLOCK]")
+            .replacingOccurrences(of: "[BLOCK]", with: String(indexedBlock))
+        indexed.font = Typography.body(12)
+        indexed.textColor = UIColor(named: "colorCommon3") ?? .secondaryLabel
+
+        let sortToggle = linkButton(poolsSort == "liquidity"
+            ? L.lang("pools-sort-liquidity", fallback: "Sort: liquidity")
+            : L.lang("pools-sort-newest", fallback: "Sort: newest"))
+        sortToggle.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            self.poolsSort = self.poolsSort == "liquidity" ? "newest" : "liquidity"
+            self.poolsAll = false
+            self.loadPoolsPage(page: 1, all: false)
+        }, for: .touchUpInside)
+        let actions = UIStackView(arrangedSubviews: [sortToggle])
+        if !poolsAll {
+            let loadAll = linkButton(L.lang("pools-load-all", fallback: "Load all pairs"))
+            loadAll.addAction(UIAction { [weak self] _ in
+                guard let self else { return }
+                self.poolsAll = true
+                self.loadPoolsPage(page: 1, all: true)
+            }, for: .touchUpInside)
+            actions.addArrangedSubview(loadAll)
+        }
+        actions.addArrangedSubview(UIView())
+        actions.axis = .horizontal
+        actions.spacing = 16
+        let bar = UIStackView(arrangedSubviews: [indexed, actions])
+        bar.axis = .vertical
+        bar.spacing = 4
+        return bar
+    }
+
+    private func buildPager(page: Int, pageCount: Int, total: Int) -> UIView {
+        let L = Localization.shared
+        let prev = linkButton("\u{2039} " + L.lang("previous", fallback: "Previous"))
+        prev.isEnabled = page > 1
+        prev.alpha = page > 1 ? 1 : 0.4
+        prev.addAction(UIAction { [weak self] _ in
+            guard let self, self.poolsPage > 1 else { return }
+            self.loadPoolsPage(page: self.poolsPage - 1, all: false)
+        }, for: .touchUpInside)
+        let label = UILabel()
+        label.text = L.lang("pools-page-of", fallback: "Page [PAGE] of [COUNT] · [TOTAL] pools")
+            .replacingOccurrences(of: "[PAGE]", with: String(page))
+            .replacingOccurrences(of: "[COUNT]", with: String(pageCount))
+            .replacingOccurrences(of: "[TOTAL]", with: String(total))
+        label.font = Typography.body(12)
+        label.textColor = UIColor(named: "colorCommon3") ?? .secondaryLabel
+        let next = linkButton(L.lang("next", fallback: "Next") + " \u{203a}")
+        next.isEnabled = page < pageCount
+        next.alpha = page < pageCount ? 1 : 0.4
+        next.addAction(UIAction { [weak self] _ in
+            guard let self, self.poolsPage < pageCount else { return }
+            self.loadPoolsPage(page: self.poolsPage + 1, all: false)
+        }, for: .touchUpInside)
+        let row = UIStackView(arrangedSubviews: [prev, label, next, UIView()])
+        row.axis = .horizontal
+        row.spacing = 12
+        row.alignment = .center
+        return row
+    }
+
+    private func linkButton(_ title: String) -> UIButton {
+        let b = UIButton(type: .system)
+        b.setAttributedTitle(NSAttributedString(string: title, attributes: [
+            .font: Typography.body(13), .foregroundColor: UIColor.quantumTeal,
+            .underlineStyle: NSUnderlineStyle.single.rawValue]), for: .normal)
+        return b
+    }
+
+    private func renderPoolRows(_ pools: [[String: Any]]) {
         poolsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         emptyLabel.isHidden = !pools.isEmpty
         poolsScroll.isHidden = pools.isEmpty

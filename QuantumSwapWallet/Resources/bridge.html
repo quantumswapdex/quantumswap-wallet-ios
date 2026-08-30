@@ -1195,7 +1195,11 @@ var BUILTIN_SWAP_RELEASE = {
     name: 'Beta2',
     wq: '0x45BD01BE5EF8509D9dA183689eA7Faf647331c54c7C9801dE54c9EDE9Ac44D92',
     factory: '0x95085766E20fCBf0106dC7037020Ca069e22080DBEF2615551Bab65D59a99754',
-    router: '0xC3666584A70A707E5e929Ba9871083ED8f9528eCe7a56FdbA485272a645D861e'
+    router: '0xC3666584A70A707E5e929Ba9871083ED8f9528eCe7a56FdbA485272a645D861e',
+    // Swap Read API served for this release (web app SWAP_API_URL /
+    // SWAP_API_DEX_ID). Payloads may carry releaseApiUrl / releaseDexId.
+    apiUrl: 'https://api.quantumswap.com',
+    dexId: 'quantumswap-beta2'
 };
 
 // Recognized hop-candidate token addresses (desktop swap-routing.ts
@@ -1210,20 +1214,679 @@ var RECOGNIZED_TOKEN_CONTRACT_ADDRESSES = [
     '0x45bd01be5ef8509d9da183689ea7faf647331c54c7c9801de54c9ede9ac44d92'  // Wrapped Q (WQ, Beta2)
 ];
 
+// Tokens that burn or tax on transfer. The router has no fee-safe
+// exact-output form (the pair's K check trusts the pre-computed input),
+// so a swap path touching one of these is always built exact-in on the
+// ...SupportingFeeOnTransferTokens variants (dexBuildSwapCall). Mirrors
+// RecognizedTokens.isFeeOnTransfer in the clients.
+var FEE_ON_TRANSFER_TOKEN_CONTRACT_ADDRESSES = [
+    '0xe8ea8beb86e714ef2bde0afac17d6e45d1c35e48f312d6dc12c4fdb90d9e8a3d', // Heisen (HSN)
+    '0xa8036870874fbed790ed4d3bbd41b2f390b9858ff021f2993e90c6d1cbb167c7'  // Year2Quantum (Y2Q)
+];
+
+function dexIsFeeOnTransferAddress(addr) {
+    var a = String(addr || '').toLowerCase();
+    for (var i = 0; i < FEE_ON_TRANSFER_TOKEN_CONTRACT_ADDRESSES.length; i++) {
+        if (FEE_ON_TRANSFER_TOKEN_CONTRACT_ADDRESSES[i].toLowerCase() === a) return true;
+    }
+    return false;
+}
+
 var SWAP_MAX_INTERMEDIATE_HOPS = 3;
 var SWAP_NO_ROUTE_ERROR =
     'No swap route exists between these two tokens: no direct pair and no route through intermediate tokens (max 3 hops).';
 var SWAP_DEADLINE_SECONDS = 1200;
 
 function dexResolveRelease(payload) {
+    function has(raw) { return raw != null && typeof raw === 'string' && raw.trim() !== ''; }
     function pick(raw, fallback) {
-        if (raw == null || typeof raw !== 'string' || raw.trim() === '') return fallback;
+        if (!has(raw)) return fallback;
         return QuantumSwapSDK.getAddress(raw.trim());
+    }
+    var custom = has(payload.releaseWq) || has(payload.releaseFactory) || has(payload.releaseRouter);
+    // Per-release Swap Read API config (web app releases.ts): a payload
+    // that names the fields decides them ('' = off for this release); a
+    // payload without them means the built-in release and its defaults.
+    // A custom release never inherits the built-in API config.
+    var apiUrl, dexId;
+    if (custom || payload.releaseApiUrl !== undefined || payload.releaseDexId !== undefined) {
+        apiUrl = swapApiSanitizeUrl(payload.releaseApiUrl);
+        dexId = swapApiIsValidDexId(payload.releaseDexId) ? payload.releaseDexId : '';
+    } else {
+        apiUrl = BUILTIN_SWAP_RELEASE.apiUrl;
+        dexId = BUILTIN_SWAP_RELEASE.dexId;
     }
     return {
         wq: pick(payload.releaseWq, BUILTIN_SWAP_RELEASE.wq),
         factory: pick(payload.releaseFactory, BUILTIN_SWAP_RELEASE.factory),
-        router: pick(payload.releaseRouter, BUILTIN_SWAP_RELEASE.router)
+        router: pick(payload.releaseRouter, BUILTIN_SWAP_RELEASE.router),
+        custom: custom,
+        apiUrl: apiUrl,
+        dexId: dexId
+    };
+}
+
+// ---------------------------------------------------------------
+// Swap Read API (the explorer's swap index): every DEX read below is
+// API-first with the on-chain path as fallback, a port of the web
+// app's swapApi (client, validators) + marketData (probe, breaker,
+// memo, apiFirst) layers. Signing, gas estimation and the transaction
+// builders never consume API data; the chosen swap path is always
+// re-quoted on-chain through the router; API decimals are never used
+// for amount math.
+// ---------------------------------------------------------------
+var SWAP_API_ROUTE_K = 3;
+var SWAP_API_TIMEOUT_MS = 4000;
+var SWAP_API_BREAKER_FAILURES = 2;
+var SWAP_API_BREAKER_COOLDOWN_MS = 30000;
+var SWAP_API_DEGRADED_LAG_BLOCKS = 20;
+var SWAP_API_ROUTE_MEMO_TTL_MS = 15000;
+var SWAP_API_ROUTE_MEMO_MAX = 500;
+var SWAP_API_MAX_URL_LEN = 200;
+var SWAP_API_MAX_PAGES = 10;      // 10 pages x 20 rows = the factory-walk cap
+var SWAP_INSUFFICIENT_LIQUIDITY_ERROR =
+    'Not enough liquidity on this route for the requested amount.';
+
+// http(s) origin + path only: no credentials, query or fragment; no
+// trailing slash; at most SWAP_API_MAX_URL_LEN characters. '' when invalid.
+function swapApiSanitizeUrl(raw) {
+    if (typeof raw !== 'string') return '';
+    var s = raw.trim();
+    if (s === '' || s.length > SWAP_API_MAX_URL_LEN) return '';
+    var m = /^(https?):\/\/([a-zA-Z0-9.-]+|\[[0-9a-fA-F:]+\])(:\d{1,5})?(\/[A-Za-z0-9._~\/-]*)?$/.exec(s);
+    if (!m) return '';
+    var path = (m[4] || '').replace(/\/+$/, '');
+    return m[1] + '://' + m[2] + (m[3] || '') + path;
+}
+
+function swapApiIsValidDexId(s) {
+    return typeof s === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(s);
+}
+
+function swapApiIsAddress(s) {
+    return typeof s === 'string' && /^0[xX][0-9a-fA-F]{64}$/.test(s);
+}
+
+function swapApiError(kind, message, status) {
+    var e = new Error(message);
+    e.name = 'SwapApiError';
+    e.kind = kind;
+    e.status = status || 0;
+    e.isOutage = kind === 'network' || kind === 'timeout' || kind === 'parse'
+        || (kind === 'http' && e.status >= 500);
+    return e;
+}
+
+function swapApiRequireAddress(s) {
+    if (!swapApiIsAddress(s)) throw swapApiError('parse', 'Swap API: invalid address');
+    return s.toLowerCase();
+}
+
+function swapApiPage(v) {
+    var n = Math.trunc(Number(v) || 1);
+    return n < 1 ? 1 : n;
+}
+
+// Contract paths (api/swap-api.yaml): dexId is a path parameter on every
+// scoped route; addresses are lower-cased; k is clamped to 1..5.
+function swapApiPath(op, a) {
+    a = a || {};
+    if (op === 'dexes') return '/swap/v1/dexes';
+    var base = '/swap/v1/' + a.dexId;
+    switch (op) {
+        case 'status': return base + '/status';
+        case 'token': return base + '/token/' + swapApiRequireAddress(a.address);
+        case 'tokens': return base + '/tokens?page=' + swapApiPage(a.page);
+        case 'pools': return base + '/pools?page=' + swapApiPage(a.page)
+            + '&sort=' + (a.sort === 'newest' ? 'newest' : 'liquidity')
+            + (a.token ? '&token=' + swapApiRequireAddress(a.token) : '');
+        case 'pool': return base + '/pool/' + swapApiRequireAddress(a.pairAddress);
+        case 'route': return base + '/route/' + swapApiRequireAddress(a.from) + '/' + swapApiRequireAddress(a.to)
+            + '?k=' + Math.min(5, Math.max(1, Math.trunc(Number(a.k) || SWAP_API_ROUTE_K)));
+        case 'pair': return base + '/pair/' + swapApiRequireAddress(a.tokenA) + '/' + swapApiRequireAddress(a.tokenB)
+            + (a.account ? '?account=' + swapApiRequireAddress(a.account) : '');
+        case 'positions': return base + '/account/' + swapApiRequireAddress(a.account) + '/positions';
+        case 'pairsCreated': return base + '/account/' + swapApiRequireAddress(a.account)
+            + '/pairs-created?page=' + swapApiPage(a.page);
+    }
+    throw swapApiError('parse', 'Swap API: unknown operation');
+}
+
+async function swapApiFetch(release, op, args) {
+    if (op !== 'dexes' && !swapApiIsValidDexId(release.dexId)) {
+        throw swapApiError('unknown-dex', 'Swap API: invalid dexId', 400);
+    }
+    var url = release.apiUrl + swapApiPath(op, Object.assign({ dexId: release.dexId }, args || {}));
+    var controller = typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = controller ? setTimeout(function() { controller.abort(); }, SWAP_API_TIMEOUT_MS) : null;
+    var res;
+    try {
+        res = await fetch(url, {
+            method: 'GET',
+            headers: { accept: 'application/json' },
+            credentials: 'omit',
+            mode: 'cors',
+            signal: controller ? controller.signal : undefined
+        });
+    } catch (e) {
+        if (timer) clearTimeout(timer);
+        var aborted = !!(e && e.name === 'AbortError');
+        throw swapApiError(aborted ? 'timeout' : 'network',
+            aborted ? 'Swap API timed out' : 'Swap API unreachable');
+    }
+    if (timer) clearTimeout(timer);
+    var body = null;
+    try { body = await res.json(); } catch (_) { body = null; }
+    if (!res.ok) {
+        var msg = body && typeof body.message === 'string' ? body.message.slice(0, 120) : '';
+        if (res.status === 404 && /dex not found/i.test(msg)) throw swapApiError('unknown-dex', msg, 404);
+        if (res.status === 404) throw swapApiError('not-found', msg || 'not found', 404);
+        throw swapApiError('http', msg || ('Swap API HTTP ' + res.status), res.status);
+    }
+    if (body === null || typeof body !== 'object') {
+        throw swapApiError('parse', 'Swap API returned a non-JSON body');
+    }
+    return body;
+}
+
+// --- validators (untrusted input) ---
+function swapApiFail(what) { throw swapApiError('parse', 'Swap API response malformed: ' + what); }
+function swapApiObj(v, what) { if (!v || typeof v !== 'object' || Array.isArray(v)) swapApiFail(what); return v; }
+function swapApiInt(v, what) { if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) swapApiFail(what); return v; }
+function swapApiBig(v, what) { if (typeof v !== 'string' || !/^0x[0-9a-fA-F]+$/.test(v)) swapApiFail(what); return BigInt(v); }
+function swapApiBool(v, what) { if (typeof v !== 'boolean') swapApiFail(what); return v; }
+function swapApiAddr(v, what) { if (!swapApiIsAddress(v)) swapApiFail(what); return v.toLowerCase(); }
+function swapApiStr(v, max) {
+    if (typeof v !== 'string') return '';
+    // Strip control, bidi-override and zero-width characters (native
+    // screens sanitize again for display).
+    return v.replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '').slice(0, max);
+}
+function swapApiRequireDexId(body, dexId, what) {
+    var o = swapApiObj(body, what);
+    if (o.dexId !== dexId) swapApiFail(what + '.dexId');
+    return o;
+}
+
+function swapApiParseTokenFacts(v, dexId) {
+    var o = swapApiRequireDexId(v, dexId, 'token');
+    var identityKnown = swapApiBool(o.identityKnown, 'token.identityKnown');
+    var decimals = null;
+    if (o.decimals !== null && o.decimals !== undefined) {
+        decimals = swapApiInt(o.decimals, 'token.decimals');
+        if (decimals > 36) swapApiFail('token.decimals');
+    }
+    return {
+        address: swapApiAddr(o.address, 'token.address'),
+        // Unresolved identity blanks symbol/name even when the body has them.
+        symbol: identityKnown ? swapApiStr(o.symbol, 16) : '',
+        name: identityKnown ? swapApiStr(o.name, 48) : '',
+        decimals: decimals,   // display only; never used for amount math
+        identityKnown: identityKnown,
+        feeOnTransfer: swapApiBool(o.feeOnTransfer, 'token.feeOnTransfer'),
+        feeBpsObserved: (o.feeBpsObserved === null || o.feeBpsObserved === undefined)
+            ? null : swapApiInt(o.feeBpsObserved, 'token.feeBpsObserved'),
+        pairCount: swapApiInt(o.pairCount, 'token.pairCount')
+    };
+}
+
+function swapApiParseReserves(v, what) {
+    var o = swapApiObj(v, what);
+    return {
+        token0: swapApiAddr(o.token0, what + '.token0'),
+        token1: swapApiAddr(o.token1, what + '.token1'),
+        reserve0: swapApiBig(o.reserve0, what + '.reserve0'),
+        reserve1: swapApiBig(o.reserve1, what + '.reserve1'),
+        lastSyncBlock: swapApiInt(o.lastSyncBlock, what + '.lastSyncBlock')
+    };
+}
+
+function swapApiParsePool(v, dexId) {
+    var o = swapApiRequireDexId(v, dexId, 'pool');
+    var r = swapApiParseReserves(o, 'pool');
+    r.pairAddress = swapApiAddr(o.pairAddress, 'pool.pairAddress');
+    r.lpTotalSupply = swapApiBig(o.lpTotalSupply, 'pool.lpTotalSupply');
+    r.token0Facts = swapApiParseTokenFacts(o.token0Facts, dexId);
+    r.token1Facts = swapApiParseTokenFacts(o.token1Facts, dexId);
+    r.swapCount = swapApiInt(o.swapCount, 'pool.swapCount');
+    r.liquidityEvents = swapApiInt(o.liquidityEvents, 'pool.liquidityEvents');
+    r.createdBlock = swapApiInt(o.createdBlock, 'pool.createdBlock');
+    r.createdAt = typeof o.createdAt === 'string' ? o.createdAt.slice(0, 40) : '';
+    r.creatorAddress = swapApiAddr(o.creatorAddress, 'pool.creatorAddress');
+    r.lpBalance = (o.lpBalance === undefined || o.lpBalance === null) ? null : swapApiBig(o.lpBalance, 'pool.lpBalance');
+    return r;
+}
+
+function swapApiParsePage(v, dexId, itemFn) {
+    var o = swapApiRequireDexId(v, dexId, 'page');
+    if (!Array.isArray(o.items)) swapApiFail('page.items');
+    return {
+        indexedBlock: swapApiInt(o.indexedBlock, 'page.indexedBlock'),
+        page: swapApiInt(o.page, 'page.page'),
+        pageCount: swapApiInt(o.pageCount, 'page.pageCount'),
+        totalItems: swapApiInt(o.totalItems, 'page.totalItems'),
+        items: o.items.map(function(it) { return itemFn(it, dexId); })
+    };
+}
+
+function swapApiParseRoute(v, dexId, from, to) {
+    var o = swapApiRequireDexId(v, dexId, 'route');
+    if (swapApiAddr(o.fromToken, 'route.fromToken') !== from
+            || swapApiAddr(o.toToken, 'route.toToken') !== to) swapApiFail('route endpoints');
+    var pairs = {};
+    var pairsRaw = swapApiObj(o.pairs, 'route.pairs');
+    Object.keys(pairsRaw).forEach(function(k) {
+        pairs[swapApiAddr(k, 'route.pairs key')] = swapApiParseReserves(pairsRaw[k], 'route.pairs');
+    });
+    var tokens = {};
+    var tokensRaw = swapApiObj(o.tokens, 'route.tokens');
+    Object.keys(tokensRaw).forEach(function(k) {
+        tokens[swapApiAddr(k, 'route.tokens key')] = swapApiParseTokenFacts(tokensRaw[k], dexId);
+    });
+    if (!Array.isArray(o.paths)) swapApiFail('route.paths');
+    var paths = o.paths.map(function(p) {
+        var po = swapApiObj(p, 'route.path');
+        if (!Array.isArray(po.hops) || po.hops.length < 1 || po.hops.length > 3) swapApiFail('route.path.hops');
+        var hops = po.hops.map(function(h) {
+            var ho = swapApiObj(h, 'route.hop');
+            var pair = swapApiAddr(ho.pairAddress, 'route.hop.pairAddress');
+            if (!pairs[pair]) swapApiFail('route.hop pair missing from pairs');
+            return {
+                pairAddress: pair,
+                tokenIn: swapApiAddr(ho.tokenIn, 'route.hop.tokenIn'),
+                tokenOut: swapApiAddr(ho.tokenOut, 'route.hop.tokenOut')
+            };
+        });
+        if (hops[0].tokenIn !== from || hops[hops.length - 1].tokenOut !== to) swapApiFail('route.path endpoints');
+        return { rank: swapApiInt(po.rank, 'route.path.rank'), hops: hops,
+                 depthKnown: swapApiBool(po.depthKnown, 'route.path.depthKnown') };
+    });
+    return {
+        indexedBlock: swapApiInt(o.indexedBlock, 'route.indexedBlock'),
+        routeVersion: swapApiInt(o.routeVersion, 'route.routeVersion'),
+        paths: paths, pairs: pairs, tokens: tokens
+    };
+}
+
+function swapApiParsePairLookup(v, dexId) {
+    var o = swapApiRequireDexId(v, dexId, 'pair');
+    var exists = swapApiBool(o.exists, 'pair.exists');
+    return {
+        indexedBlock: swapApiInt(o.indexedBlock, 'pair.indexedBlock'),
+        exists: exists,
+        pair: exists && o.pair ? swapApiParsePool(o.pair, dexId) : null,
+        accountLpBalance: (o.accountLpBalance === undefined || o.accountLpBalance === null)
+            ? null : swapApiBig(o.accountLpBalance, 'pair.accountLpBalance')
+    };
+}
+
+function swapApiParsePositions(v, dexId, account) {
+    var o = swapApiRequireDexId(v, dexId, 'positions');
+    if (swapApiAddr(o.account, 'positions.account') !== account) swapApiFail('positions.account');
+    if (!Array.isArray(o.items)) swapApiFail('positions.items');
+    return {
+        indexedBlock: swapApiInt(o.indexedBlock, 'positions.indexedBlock'),
+        capped: swapApiBool(o.capped, 'positions.capped'),
+        items: o.items.map(function(it) {
+            var p = swapApiParsePool(it, dexId);
+            if (p.lpBalance === null) swapApiFail('position.lpBalance');
+            return p;
+        })
+    };
+}
+
+function swapApiParseDexList(v) {
+    var o = swapApiObj(v, 'dexes');
+    if (!Array.isArray(o.dexes)) swapApiFail('dexes.dexes');
+    return {
+        indexedBlock: swapApiInt(o.indexedBlock, 'dexes.indexedBlock'),
+        lagBlocks: swapApiInt(o.lagBlocks, 'dexes.lagBlocks'),
+        degraded: swapApiBool(o.degraded, 'dexes.degraded'),
+        dexes: o.dexes.map(function(d) {
+            var dd = swapApiObj(d, 'dex');
+            if (!swapApiIsValidDexId(dd.dexId)) swapApiFail('dex.dexId');
+            return {
+                dexId: dd.dexId,
+                name: swapApiStr(dd.name, 48),
+                factoryAddress: swapApiAddr(dd.factoryAddress, 'dex.factoryAddress'),
+                routerAddress: swapApiAddr(dd.routerAddress, 'dex.routerAddress'),
+                wrappedCoinAddress: swapApiAddr(dd.wrappedCoinAddress, 'dex.wrappedCoinAddress')
+            };
+        })
+    };
+}
+
+function swapApiParseDexStatus(v, dexId) {
+    var o = swapApiRequireDexId(v, dexId, 'status');
+    return {
+        indexedBlock: swapApiInt(o.indexedBlock, 'status.indexedBlock'),
+        lagBlocks: swapApiInt(o.lagBlocks, 'status.lagBlocks'),
+        degraded: swapApiBool(o.degraded, 'status.degraded'),
+        pairs: swapApiInt(o.pairs, 'status.pairs'),
+        activePairs: swapApiInt(o.activePairs, 'status.activePairs'),
+        tokens: swapApiInt(o.tokens, 'status.tokens')
+    };
+}
+
+// --- market state: probe, breaker, memo (web app marketData) ---
+var swapMarket = swapApiFreshMarket('');
+var swapRouteMemo = {};
+// The request that just failed before a fallback to the chain, reported
+// once to the caller (result.apiFallback) so the screen can toast it:
+// kind, HTTP status and the server's message.
+var swapApiLastFallback = null;
+
+function swapApiNoteFallback(e) {
+    var status = e && e.status ? Number(e.status) : 0;
+    var kind = e && e.kind ? String(e.kind) : 'error';
+    var message = swapApiStr(e && e.message ? String(e.message) : '', 160);
+    var detail = status > 0
+        ? 'HTTP ' + status + (message ? ': ' + message : '')
+        : (message || kind);
+    swapApiLastFallback = { kind: kind, status: status, message: message, detail: detail };
+}
+
+function swapApiWithFallback(result) {
+    if (swapApiLastFallback && result && typeof result === 'object') {
+        result.apiFallback = swapApiLastFallback;
+    }
+    swapApiLastFallback = null;
+    return result;
+}
+
+function swapApiSendResult(requestId, data) {
+    sendResult(requestId, swapApiWithFallback(data));
+}
+
+function swapApiFreshMarket(key) {
+    return { key: key, status: 'unknown', indexedBlock: 0, lagBlocks: 0, degraded: false,
+             failures: 0, trippedAt: 0, probedAt: 0, probing: null };
+}
+
+function swapApiReleaseKey(release) {
+    return release.apiUrl + '|' + release.dexId + '|' + String(release.factory).toLowerCase();
+}
+
+// GET /dexes once per release: the configured dexId counts only when the
+// entry's factoryAddress equals the active release factory (a custom
+// deployment must never read the built-in DEX's pools). Memoised until
+// the release changes or the breaker trips.
+async function swapApiProbe(release) {
+    var key = swapApiReleaseKey(release);
+    if (swapMarket.key !== key) {
+        swapMarket = swapApiFreshMarket(key);
+        swapRouteMemo = {};
+    }
+    if (!(release.apiUrl && release.dexId)) { swapMarket.status = 'disabled'; return swapMarket; }
+    if (swapMarket.status === 'ok' || swapMarket.status === 'no-dex') return swapMarket;
+    if (swapMarket.status === 'unavailable'
+            && Date.now() - swapMarket.trippedAt < SWAP_API_BREAKER_COOLDOWN_MS) return swapMarket;
+    if (swapMarket.probing) return swapMarket.probing;
+    swapMarket.probing = (async function() {
+        try {
+            var list = swapApiParseDexList(await swapApiFetch(release, 'dexes'));
+            var candidate = null;
+            for (var i = 0; i < list.dexes.length; i++) {
+                if (list.dexes[i].dexId === release.dexId) candidate = list.dexes[i];
+            }
+            if (!candidate || candidate.factoryAddress !== String(release.factory).toLowerCase()) {
+                swapMarket.status = 'no-dex';
+            } else {
+                swapMarket.status = 'ok';
+                swapMarket.failures = 0;
+                swapMarket.indexedBlock = list.indexedBlock;
+                swapMarket.lagBlocks = list.lagBlocks;
+                swapMarket.degraded = list.degraded || list.lagBlocks > SWAP_API_DEGRADED_LAG_BLOCKS;
+            }
+        } catch (e) {
+            swapApiNoteFallback(e);
+            swapMarket.status = 'unavailable';
+            swapMarket.trippedAt = Date.now();
+            swapMarket.failures = 0;
+        } finally {
+            swapMarket.probedAt = Date.now();
+            swapMarket.probing = null;
+        }
+        return swapMarket;
+    })();
+    return swapMarket.probing;
+}
+
+// Outages (network, timeout, parse, HTTP 5xx) count toward the breaker;
+// 404s and other 4xx are answers, not outages.
+function swapApiRecordFailure(e) {
+    if (!(e && e.isOutage)) return;
+    swapMarket.failures++;
+    if (swapMarket.failures >= SWAP_API_BREAKER_FAILURES) {
+        swapMarket.status = 'unavailable';
+        swapMarket.trippedAt = Date.now();
+        swapMarket.failures = 0;
+    }
+}
+
+async function swapApiAvailable(release) {
+    var m = await swapApiProbe(release);
+    if (m.status === 'unavailable' && Date.now() - m.trippedAt >= SWAP_API_BREAKER_COOLDOWN_MS) {
+        m.status = 'unknown';                       // re-probe at most once per cooldown
+        m = await swapApiProbe(release);
+    }
+    return m.status === 'ok';
+}
+
+// API first when usable, else the chain. A 404 is a real answer unless
+// the caller asks for the chain instead (notFoundToRpc); an unknown
+// dexId turns the market off for this release; outages feed the breaker.
+async function swapApiFirst(release, apiFn, rpcFn, opts) {
+    opts = opts || {};
+    var wasUnavailable = swapMarket.status === 'unavailable';
+    if (await swapApiAvailable(release)) {
+        try {
+            return await apiFn(release.dexId);
+        } catch (e) {
+            if (e && e.kind === 'not-found') {
+                if (!opts.notFoundToRpc) throw e;
+            } else if (e && e.kind === 'unknown-dex') {
+                swapApiNoteFallback(e);
+                swapMarket.status = 'no-dex';
+            } else {
+                swapApiNoteFallback(e);
+                swapApiRecordFailure(e);
+            }
+        }
+    } else if (wasUnavailable) {
+        // Tripped breaker: the probe already reported the failure once;
+        // stay quiet until the next re-probe.
+        swapApiLastFallback = null;
+    }
+    return rpcFn();
+}
+
+async function swapApiRoute(release, from, to) {
+    var key = release.dexId + '|' + from + '|' + to + '|' + SWAP_API_ROUTE_K;
+    var hit = swapRouteMemo[key];
+    if (hit && Date.now() - hit.at < SWAP_API_ROUTE_MEMO_TTL_MS) return hit.route;
+    var route = swapApiParseRoute(
+        await swapApiFetch(release, 'route', { from: from, to: to, k: SWAP_API_ROUTE_K }),
+        release.dexId, from, to);
+    if (Object.keys(swapRouteMemo).length > SWAP_API_ROUTE_MEMO_MAX) swapRouteMemo = {};
+    swapRouteMemo[key] = { at: Date.now(), route: route };
+    return route;
+}
+
+// --- constant-product math + candidate evaluation (web app quoteMath /
+// routeFinder). Reserves come from the index; the chosen path is still
+// re-quoted on-chain before the number reaches the user. ---
+function dexGetAmountOut(amountIn, reserveIn, reserveOut) {
+    if (amountIn <= 0n || reserveIn <= 0n || reserveOut <= 0n) return 0n;
+    var withFee = amountIn * 997n;
+    return (withFee * reserveOut) / (reserveIn * 1000n + withFee);
+}
+
+function dexGetAmountIn(amountOut, reserveIn, reserveOut) {
+    if (amountOut <= 0n || reserveIn <= 0n || reserveOut <= 0n) return 0n;
+    if (amountOut >= reserveOut) return 0n;
+    return (reserveIn * amountOut * 1000n) / ((reserveOut - amountOut) * 997n) + 1n;
+}
+
+function dexHopReserves(route, hop) {
+    var r = route.pairs[hop.pairAddress];
+    if (!r) return null;
+    var reserveIn, reserveOut;
+    if (r.token0 === hop.tokenIn && r.token1 === hop.tokenOut) { reserveIn = r.reserve0; reserveOut = r.reserve1; }
+    else if (r.token1 === hop.tokenIn && r.token0 === hop.tokenOut) { reserveIn = r.reserve1; reserveOut = r.reserve0; }
+    else return null;
+    if (reserveIn <= 0n || reserveOut <= 0n) return null;
+    return { reserveIn: reserveIn, reserveOut: reserveOut };
+}
+
+function dexSimulateExactIn(route, path, amountIn) {
+    var amount = amountIn;
+    for (var i = 0; i < path.hops.length; i++) {
+        var hr = dexHopReserves(route, path.hops[i]);
+        if (!hr) return null;
+        amount = dexGetAmountOut(amount, hr.reserveIn, hr.reserveOut);
+        if (amount <= 0n) return null;
+    }
+    return amount;
+}
+
+function dexSimulateExactOut(route, path, amountOut) {
+    var amount = amountOut;
+    for (var i = path.hops.length - 1; i >= 0; i--) {
+        var hr = dexHopReserves(route, path.hops[i]);
+        if (!hr) return null;
+        if (amount >= hr.reserveOut) return null;
+        amount = dexGetAmountIn(amount, hr.reserveIn, hr.reserveOut);
+        if (amount <= 0n) return null;
+    }
+    return amount;
+}
+
+function dexPathTokens(path) {
+    var t = [path.hops[0].tokenIn];
+    path.hops.forEach(function(h) { t.push(h.tokenOut); });
+    return t;
+}
+
+function dexRouteSymbols(route, path) {
+    return dexPathTokens(path).map(function(a) {
+        var f = route.tokens[a];
+        return f && f.symbol ? f.symbol : null;
+    });
+}
+
+function dexRouteFeeFlags(route, path) {
+    return dexPathTokens(path).filter(function(a) {
+        var f = route.tokens[a];
+        return !!(f && f.feeOnTransfer);
+    }).map(function(a) { return QuantumSwapSDK.getAddress(a); });
+}
+
+// Best candidate for this amount: max output (exact-in) / min input
+// (exact-out); ties go to the shorter path, then API rank order. null
+// when no candidate can fill the amount.
+function dexPickRoute(route, amountWei, mode) {
+    var best = null;
+    for (var i = 0; i < route.paths.length; i++) {
+        var p = route.paths[i];
+        var v = mode === 'exactOut'
+            ? dexSimulateExactOut(route, p, amountWei)
+            : dexSimulateExactIn(route, p, amountWei);
+        if (v === null) continue;
+        var better = best === null
+            || (mode === 'exactOut' ? v < best.amount : v > best.amount)
+            || (v === best.amount && p.hops.length < best.path.hops.length);
+        if (better) best = { path: p, amount: v };
+    }
+    return best;
+}
+
+// Quote for one side (mode 'exactIn' | 'exactOut', amountWei BigInt):
+// API route -> local pick -> router re-quote of the chosen path
+// ('router'; the local number survives only when the router call fails,
+// as 'api-estimate'); without the API, the on-chain path search + router.
+async function dexResolveSwapQuote(payload, release, provider, mode, amountWei) {
+    var getAddress = QuantumSwapSDK.getAddress;
+    var router = QuantumSwapSDK.QuantumSwapV2Router02.connect(release.router, provider);
+    var fromAddr = getAddress(dexMapTokenValue(payload.fromTokenValue, release));
+    var toAddr = getAddress(dexMapTokenValue(payload.toTokenValue, release));
+    var from = fromAddr.toLowerCase();
+    var to = toAddr.toLowerCase();
+    async function routerQuote(path) {
+        if (mode === 'exactOut') {
+            var ins = await router.getAmountsIn(amountWei, path);
+            return dexAsBigInt(Array.isArray(ins) ? ins[0] : ins);
+        }
+        var outs = await router.getAmountsOut(amountWei, path);
+        return dexAsBigInt(Array.isArray(outs) ? outs[outs.length - 1] : outs);
+    }
+    var route = from === to ? null : await swapApiFirst(release, function() {
+        return swapApiRoute(release, from, to);
+    }, function() { return null; });
+    if (route) {
+        if (route.paths.length === 0) throw new Error(SWAP_NO_ROUTE_ERROR);
+        var pick = dexPickRoute(route, amountWei, mode);
+        if (!pick) throw new Error(SWAP_INSUFFICIENT_LIQUIDITY_ERROR);
+        var path = dexPathTokens(pick.path).map(function(a) { return getAddress(a); });
+        var symbols = dexRouteSymbols(route, pick.path);
+        var feeFlags = dexRouteFeeFlags(route, pick.path);
+        try {
+            var chain = await routerQuote(path);
+            if (chain > 0n) {
+                return { path: path, amountWei: chain, source: 'router', indexedBlock: route.indexedBlock,
+                         pathSymbols: symbols, feeOnTransfer: feeFlags };
+            }
+        } catch (_) { /* keep the indexed estimate */ }
+        return { path: path, amountWei: pick.amount, source: 'api-estimate', indexedBlock: route.indexedBlock,
+                 pathSymbols: symbols, feeOnTransfer: feeFlags };
+    }
+    var rpcPath = await dexResolveSwapPath(provider, payload.fromTokenValue, payload.toTokenValue, release);
+    return { path: rpcPath, amountWei: await routerQuote(rpcPath), source: 'router', indexedBlock: 0,
+             pathSymbols: null, feeOnTransfer: [] };
+}
+
+// The path the screen quoted, so estimate and submit build the same
+// route: 2..5 addresses, endpoints equal the mapped from/to, no repeats.
+function dexPathFromPayload(payload, fromAddr, toAddr) {
+    var raw = payload.path;
+    if (!Array.isArray(raw) || raw.length < 2 || raw.length > 5) return null;
+    var out = [];
+    var seen = {};
+    for (var i = 0; i < raw.length; i++) {
+        if (!swapApiIsAddress(raw[i])) return null;
+        var a = QuantumSwapSDK.getAddress(raw[i]);
+        if (seen[a.toLowerCase()]) return null;
+        seen[a.toLowerCase()] = true;
+        out.push(a);
+    }
+    if (out[0].toLowerCase() !== String(fromAddr).toLowerCase()
+            || out[out.length - 1].toLowerCase() !== String(toAddr).toLowerCase()) return null;
+    return out;
+}
+
+// API pool -> the pair snapshot shape the native list screens already
+// render (dexReadPairSnapshot). Decimals here are display-only for the
+// reserve columns (null = not decoded yet -> 18); amounts the user
+// enters always use the picker's on-chain decimals.
+function swapApiPoolToSnapshot(pool) {
+    var getAddress = QuantumSwapSDK.getAddress;
+    return {
+        pairAddress: getAddress(pool.pairAddress),
+        token0: getAddress(pool.token0),
+        token1: getAddress(pool.token1),
+        symbol0: pool.token0Facts.symbol || null,
+        symbol1: pool.token1Facts.symbol || null,
+        decimals0: pool.token0Facts.decimals === null ? 18 : pool.token0Facts.decimals,
+        decimals1: pool.token1Facts.decimals === null ? 18 : pool.token1Facts.decimals,
+        reserve0: pool.reserve0.toString(),
+        reserve1: pool.reserve1.toString(),
+        totalSupply: pool.lpTotalSupply.toString(),
+        lpBalance: pool.lpBalance === null ? undefined : pool.lpBalance.toString(),
+        swapCount: pool.swapCount,
+        createdBlock: pool.createdBlock,
+        creatorAddress: getAddress(pool.creatorAddress),
+        feeOnTransfer0: pool.token0Facts.feeOnTransfer,
+        feeOnTransfer1: pool.token1Facts.feeOnTransfer
     };
 }
 
@@ -1260,8 +1923,16 @@ function dexMinWeiWithSlippage(amount, slippagePercent) {
     return (amount * (10000n - bps)) / 10000n;
 }
 
+// Slippage tolerance added on top of a quoted input: the most an
+// exact-output swap may spend (amountInMax).
+function dexMaxWeiWithSlippage(amount, slippagePercent) {
+    var bps = BigInt(Math.round(Math.max(0, Math.min(100, Number(slippagePercent) || 0)) * 100));
+    if (bps <= 0n) return amount;
+    return (amount * (10000n + bps)) / 10000n;
+}
+
 // Router compares deadline to block.timestamp; use chain time so slow
-// or skewed clocks do not hit UniswapV2Router: EXPIRED.
+// or skewed clocks do not trip the router's EXPIRED check.
 async function dexGetDeadline(provider, futureSeconds) {
     var sec = BigInt(Math.max(60, Math.min(86400,
         Number(futureSeconds) > 0 ? Number(futureSeconds) : SWAP_DEADLINE_SECONDS)));
@@ -1343,6 +2014,9 @@ async function dexFindSwapPath(provider, fromAddrRaw, toAddrRaw, release) {
     var getAddress = QuantumSwapSDK.getAddress;
     var fromAddr = getAddress(fromAddrRaw);
     var toAddr = getAddress(toAddrRaw);
+    // Identical mapped addresses (native Q vs WQ) have no route: that is
+    // a wrap / unwrap, never a router swap (web-app routeFinder.ts).
+    if (fromAddr.toLowerCase() === toAddr.toLowerCase()) return null;
     var factory = QuantumSwapSDK.QuantumSwapV2Factory.connect(release.factory, provider);
     var seen = {};
     seen[fromAddr.toLowerCase()] = true;
@@ -1439,28 +2113,139 @@ async function dexReadPairSnapshot(provider, pairAddress) {
     };
 }
 
-// Resolve amountInWei/amountOutMinWei for a swap the same way the
-// desktop's estimate/submit paths do (lastChanged: 'from' | 'to').
+// Resolve the swap amounts from the side the user last edited
+// (lastChanged: 'from' | 'to'), as the web app does. Exact-in ('from'):
+// amountInWei and amountOutMinWei (quote less slippage). Exact-out
+// ('to'): amountOutWei and amountInMaxWei (quote plus slippage), plus
+// the quoted amountInWei and amountOutMinWei so the builder can fall
+// back to exact-in without a second quote.
 async function dexResolveSwapAmounts(router, path, payload) {
     var parseUnits = QuantumSwapSDK.parseUnits;
     var fromDecimals = typeof payload.fromDecimals === 'number' ? payload.fromDecimals : 18;
     var toDecimals = typeof payload.toDecimals === 'number' ? payload.toDecimals : 18;
     var lastChanged = payload.lastChanged === 'to' ? 'to' : 'from';
     var slippagePercent = Math.max(0, Math.min(100, Number(payload.slippagePercent) || 1));
-    var amountInWei;
-    var amountOutMinWei;
     if (lastChanged === 'to') {
         var amountOutWei = parseUnits(String(payload.amountOut), toDecimals);
         var amountsIn = await router.getAmountsIn(amountOutWei, path);
-        amountInWei = Array.isArray(amountsIn) ? amountsIn[0] : amountsIn;
-        amountOutMinWei = (amountOutWei * BigInt(100 - slippagePercent)) / 100n;
-    } else {
-        amountInWei = parseUnits(String(payload.amountIn), fromDecimals);
-        var amountsOut = await router.getAmountsOut(amountInWei, path);
-        var expectedOutWei = Array.isArray(amountsOut) ? amountsOut[amountsOut.length - 1] : amountsOut;
-        amountOutMinWei = (expectedOutWei * BigInt(100 - slippagePercent)) / 100n;
+        var quotedInWei = Array.isArray(amountsIn) ? amountsIn[0] : amountsIn;
+        return { mode: 'exactOut',
+                 amountOutWei: amountOutWei,
+                 amountInMaxWei: dexMaxWeiWithSlippage(quotedInWei, slippagePercent),
+                 amountInWei: quotedInWei,
+                 amountOutMinWei: dexMinWeiWithSlippage(amountOutWei, slippagePercent) };
     }
-    return { amountInWei: amountInWei, amountOutMinWei: amountOutMinWei };
+    var amountInWei = parseUnits(String(payload.amountIn), fromDecimals);
+    var amountsOut = await router.getAmountsOut(amountInWei, path);
+    var expectedOutWei = Array.isArray(amountsOut) ? amountsOut[amountsOut.length - 1] : amountsOut;
+    return { mode: 'exactIn',
+             amountInWei: amountInWei,
+             amountOutMinWei: dexMinWeiWithSlippage(expectedOutWei, slippagePercent) };
+}
+
+// Router call for a swap. The side the user last edited decides the
+// form, as in the web app: From edited (lastChanged 'from') -> exact-in;
+// To edited ('to') -> exact-out with amountInMax from slippage. Native
+// "Q" on the from side uses the payable ETH variant with the input (or
+// maximum input) as tx value -- the router wraps internally, so the user
+// needs neither WQ nor an allowance. Native "Q" on the to side uses the
+// ...ForETH variant so the user receives Q, not WQ.
+//
+// Exact-in always uses the ...SupportingFeeOnTransferTokens forms: they
+// derive each hop's input from the pair's ACTUAL balance delta and check
+// amountOutMin on what the recipient really received, so tokens that burn
+// or tax on transfer swap correctly (the standard forms trust the
+// pre-computed amounts and revert with the pair's K check when less than
+// amountIn arrives). They are equally correct for normal tokens.
+//
+// No fee-safe exact-out form exists, so exact-out is guarded twice: a
+// path touching a listed fee-on-transfer token is built exact-in on the
+// quoted input instead (fallback 'feeToken'), and otherwise the exact-out
+// call is pre-flighted with an estimate from the sender and falls back
+// the same way when it reverts (fallback 'reverted'). The result carries
+// swapMode and the fallback so the client can explain the switch. Both
+// submit (swapSubmitSwap) and estimate (dexEstimateGas 'swap') build
+// through here, so they cannot diverge. Mirrors dexBuildAddLiquidityCall.
+async function dexBuildSwapCall(payload, release, provider) {
+    var getAddress = QuantumSwapSDK.getAddress;
+    var toRaw = payload.recipientAddress || payload.toAddress || payload.fromAddress || payload.ownerAddress;
+    if (!toRaw) throw new Error('Recipient address required');
+    var to = getAddress(String(toRaw));
+    var fromIsNative = payload.fromTokenValue === 'Q';
+    var toIsNative = payload.toTokenValue === 'Q';
+    if (fromIsNative && toIsNative) throw new Error('Both sides cannot be the native coin');
+    var router = QuantumSwapSDK.QuantumSwapV2Router02.connect(release.router, provider);
+    var path = dexPathFromPayload(payload,
+            getAddress(dexMapTokenValue(payload.fromTokenValue, release)),
+            getAddress(dexMapTokenValue(payload.toTokenValue, release)))
+        || await dexResolveSwapPath(provider, payload.fromTokenValue, payload.toTokenValue, release);
+    var deadline = await dexGetDeadline(provider, SWAP_DEADLINE_SECONDS);
+    var amounts = await dexResolveSwapAmounts(router, path, payload);
+    var exactIn = function(fallback, reason) {
+        var call;
+        if (fromIsNative) {
+            call = { method: 'swapExactETHForTokensSupportingFeeOnTransferTokens',
+                     args: [amounts.amountOutMinWei, path, to, deadline],
+                     value: amounts.amountInWei };
+        } else if (toIsNative) {
+            call = { method: 'swapExactTokensForETHSupportingFeeOnTransferTokens',
+                     args: [amounts.amountInWei, amounts.amountOutMinWei, path, to, deadline],
+                     value: 0n };
+        } else {
+            call = { method: 'swapExactTokensForTokensSupportingFeeOnTransferTokens',
+                     args: [amounts.amountInWei, amounts.amountOutMinWei, path, to, deadline],
+                     value: 0n };
+        }
+        call.swapMode = 'exactIn';
+        call.fallback = fallback || '';
+        call.fallbackReason = reason || '';
+        return call;
+    };
+    if (amounts.mode !== 'exactOut') return exactIn('', '');
+    for (var i = 0; i < path.length; i++) {
+        if (dexIsFeeOnTransferAddress(path[i])) return exactIn('feeToken', '');
+    }
+    var call;
+    if (fromIsNative) {
+        call = { method: 'swapETHForExactTokens',
+                 args: [amounts.amountOutWei, path, to, deadline],
+                 value: amounts.amountInMaxWei };
+    } else if (toIsNative) {
+        call = { method: 'swapTokensForExactETH',
+                 args: [amounts.amountOutWei, amounts.amountInMaxWei, path, to, deadline],
+                 value: 0n };
+    } else {
+        call = { method: 'swapTokensForExactTokens',
+                 args: [amounts.amountOutWei, amounts.amountInMaxWei, path, to, deadline],
+                 value: 0n };
+    }
+    call.swapMode = 'exactOut';
+    call.fallback = '';
+    call.fallbackReason = '';
+    // Pre-flight from the sender. Any revert (an unlisted fee-on-transfer
+    // token, but also a balance or allowance shortfall) switches to
+    // exact-in; the estimate that follows then surfaces the real reason
+    // through the ordinary gas-fallback notice if it reverts too.
+    var senderRaw = payload.fromAddress || payload.ownerAddress || payload.recipientAddress;
+    try {
+        var probe = await router.populateTransaction[call.method].apply(router.populateTransaction, call.args);
+        if (call.value > 0n) probe.value = call.value;
+        if (senderRaw) probe.from = getAddress(String(senderRaw));
+        await provider.estimateGas(probe);
+    } catch (e) {
+        return exactIn('reverted', dexSanitizeError(e));
+    }
+    return call;
+}
+
+// Q <-> WQ is a 1:1 wrap / unwrap against the WQ contract itself:
+// WQ.deposit() with the amount as tx value, or WQ.withdraw(amount).
+// No router, no allowance. WQ is WETH-like (18 decimals).
+function dexBuildWrapCall(kind, payload) {
+    var amountWei = QuantumSwapSDK.parseUnits(String(payload.amount), 18);
+    return kind === 'wrap'
+        ? { method: 'deposit', args: [], value: amountWei }
+        : { method: 'withdraw', args: [amountWei], value: 0n };
 }
 
 // addLiquidity / addLiquidityETH arguments (desktop liquidity-tx.ts
@@ -1535,7 +2320,11 @@ async function dexBuildRemoveLiquidityCall(payload, release, provider) {
         var token = aIsWq ? tokenB : tokenA;
         var tokenMin = aIsWq ? amountBMin : amountAMin;
         var ethMin = aIsWq ? amountAMin : amountBMin;
-        return { method: 'removeLiquidityETH', args: [token, liquidity, tokenMin, ethMin, to, deadline], value: 0n };
+        // ...SupportingFeeOnTransferTokens: removeLiquidityETH burns to the
+        // ROUTER, which receives the token minus any transfer fee and then
+        // forwards the pre-fee amount -- reverting for burn/tax-on-transfer
+        // tokens. This form forwards its actual balance. Same arguments.
+        return { method: 'removeLiquidityETHSupportingFeeOnTransferTokens', args: [token, liquidity, tokenMin, ethMin, to, deadline], value: 0n };
     }
     return { method: 'removeLiquidity', args: [tokenA, tokenB, liquidity, amountAMin, amountBMin, to, deadline], value: 0n };
 }
@@ -1577,6 +2366,32 @@ function dexZeroKeys(keyRefs) {
     }
 }
 
+// Shared body of swapSubmitWrap / swapSubmitUnwrap (same shape as
+// swapSubmitApproval): sign one WQ.deposit / WQ.withdraw transaction.
+async function dexSubmitWrap(requestId, kind) {
+    var payload = null;
+    var keyRefs = { priv: null, pub: null };
+    try {
+        if (!requireSDK(requestId)) return;
+        payload = pullPayload(requestId);
+        if (!payload) return;
+        var provider = await dexInit(payload);
+        var release = dexResolveRelease(payload);
+        var wallet = await dexWalletFromBinaryKeys(requestId, provider, keyRefs, payload);
+        var call = dexBuildWrapCall(kind, payload);
+        var gasLimit = Number(payload.gasLimit) || 84000;
+        var wq = QuantumSwapSDK.WQ.connect(release.wq, wallet);
+        var overrides = dexSigningOverrides(wallet, payload,
+            call.value > 0n ? { gasLimit: gasLimit, value: call.value } : { gasLimit: gasLimit });
+        var tx = await wq[call.method].apply(wq, call.args.concat([overrides]));
+        sendResult(requestId, { txHash: tx.hash });
+    } catch (e) {
+        sendError(requestId, dexSanitizeError(e));
+    } finally {
+        dexZeroKeys(keyRefs);
+    }
+}
+
 // CreatedToken deploy support: ABI + bytecode copied VERBATIM from the
 // desktop electron/created-token.ts (compiled from CreatedToken.sol with
 // the QuantumCoin solc 0.7.6 toolchain). Constructor
@@ -1587,37 +2402,52 @@ var CREATED_TOKEN_BYTECODE = "0x" + "60806040523480156200001157600080fd5b5060405
 
 Object.assign(bridge, {
     // Token metadata + optional balance for the token pickers
-    // (desktop SwapTokenGetMetadata).
+    // (desktop SwapTokenGetMetadata). Identity (name / symbol / fee flag)
+    // is API-first; decimals and the balance stay on-chain because API
+    // decimals are never used for math.
     swapGetTokenMetadata: async function(requestId) {
         try {
             if (!requireSDK(requestId)) return;
             var payload = pullPayload(requestId);
             if (!payload) return;
             var provider = await dexInit(payload);
+            var release = dexResolveRelease(payload);
             var getAddress = QuantumSwapSDK.getAddress;
             var contractAddress = getAddress(String(payload.contractAddress || ''));
             var ownerAddress = payload.ownerAddress ? getAddress(String(payload.ownerAddress)) : null;
             var token = QuantumSwapSDK.IERC20.connect(contractAddress, provider);
+            var facts = await swapApiFirst(release, async function(dexId) {
+                return swapApiParseTokenFacts(
+                    await swapApiFetch(release, 'token', { address: contractAddress }), dexId);
+            }, function() { return null; }, { notFoundToRpc: true });
             var nameValue = '';
-            try {
-                if (typeof token.name === 'function') nameValue = String(await token.name());
-            } catch (_) { /* name() is optional metadata */ }
+            var symbolValue = '';
+            if (facts && facts.identityKnown) {
+                nameValue = facts.name;
+                symbolValue = facts.symbol;
+            } else {
+                try {
+                    if (typeof token.name === 'function') nameValue = String(await token.name());
+                } catch (_) { /* name() is optional metadata */ }
+                symbolValue = String((await token.symbol()) || '');
+            }
             var results = await Promise.all([
-                token.symbol(),
                 token.decimals(),
                 ownerAddress == null ? Promise.resolve(0n) : token.balanceOf(ownerAddress)
             ]);
-            var decimals = Number(results[1]);
+            var decimals = Number(results[0]);
             if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
                 sendError(requestId, 'Invalid token decimals');
                 return;
             }
-            sendResult(requestId, {
+            swapApiSendResult(requestId, {
                 contractAddress: contractAddress,
                 name: String(nameValue || ''),
-                symbol: String(results[0] || ''),
+                symbol: String(symbolValue || ''),
                 decimals: decimals,
-                balance: QuantumSwapSDK.formatUnits(results[2], decimals)
+                balance: QuantumSwapSDK.formatUnits(results[1], decimals),
+                feeOnTransfer: !!(facts && facts.feeOnTransfer),
+                source: facts ? 'api' : 'chain'
             });
         } catch (e) {
             sendError(requestId, dexSanitizeError(e));
@@ -1625,7 +2455,8 @@ Object.assign(bridge, {
     },
 
     // Route check: exists=true when a direct pair OR a multi-hop route
-    // exists (desktop SwapQuoteCheckPairExists).
+    // exists (desktop SwapQuoteCheckPairExists). API first: the best
+    // indexed path (rank 1) with its symbols; on-chain search otherwise.
     swapCheckPairExists: async function(requestId) {
         try {
             if (!requireSDK(requestId)) return;
@@ -1633,17 +2464,37 @@ Object.assign(bridge, {
             if (!payload) return;
             var provider = await dexInit(payload);
             var release = dexResolveRelease(payload);
-            var path = await dexFindSwapPath(
-                provider,
-                dexMapTokenValue(payload.fromTokenValue, release),
-                dexMapTokenValue(payload.toTokenValue, release),
-                release);
+            var getAddress = QuantumSwapSDK.getAddress;
+            var fromAddr = getAddress(dexMapTokenValue(payload.fromTokenValue, release));
+            var toAddr = getAddress(dexMapTokenValue(payload.toTokenValue, release));
+            if (fromAddr.toLowerCase() !== toAddr.toLowerCase()) {
+                var route = await swapApiFirst(release, function() {
+                    return swapApiRoute(release, fromAddr.toLowerCase(), toAddr.toLowerCase());
+                }, function() { return null; });
+                if (route) {
+                    if (route.paths.length === 0) {
+                        swapApiSendResult(requestId, { exists: false, path: null, pathSymbols: null,
+                                                source: 'api', indexedBlock: route.indexedBlock });
+                        return;
+                    }
+                    var apiPath = dexPathTokens(route.paths[0]).map(function(a) { return getAddress(a); });
+                    var apiSymbols = dexRouteSymbols(route, route.paths[0]);
+                    if (apiSymbols.some(function(sym) { return sym === null; })) {
+                        apiSymbols = await dexGetPathSymbols(provider, apiPath);
+                    }
+                    swapApiSendResult(requestId, { exists: true, path: apiPath, pathSymbols: apiSymbols,
+                                            source: 'api', indexedBlock: route.indexedBlock,
+                                            feeOnTransfer: dexRouteFeeFlags(route, route.paths[0]) });
+                    return;
+                }
+            }
+            var path = await dexFindSwapPath(provider, fromAddr, toAddr, release);
             if (!path) {
-                sendResult(requestId, { exists: false, path: null, pathSymbols: null });
+                swapApiSendResult(requestId, { exists: false, path: null, pathSymbols: null, source: 'chain' });
                 return;
             }
             var pathSymbols = await dexGetPathSymbols(provider, path);
-            sendResult(requestId, { exists: true, path: path, pathSymbols: pathSymbols });
+            swapApiSendResult(requestId, { exists: true, path: path, pathSymbols: pathSymbols, source: 'chain' });
         } catch (e) {
             sendError(requestId, dexSanitizeError(e));
         }
@@ -1657,14 +2508,17 @@ Object.assign(bridge, {
             if (!payload) return;
             var provider = await dexInit(payload);
             var release = dexResolveRelease(payload);
-            var router = QuantumSwapSDK.QuantumSwapV2Router02.connect(release.router, provider);
-            var path = await dexResolveSwapPath(provider, payload.fromTokenValue, payload.toTokenValue, release);
             var fromDecimals = typeof payload.fromDecimals === 'number' ? payload.fromDecimals : 18;
             var toDecimals = typeof payload.toDecimals === 'number' ? payload.toDecimals : 18;
             var amountInWei = QuantumSwapSDK.parseUnits(String(payload.amountIn), fromDecimals);
-            var amounts = await router.getAmountsOut(amountInWei, path);
-            var amountOutWei = Array.isArray(amounts) ? amounts[amounts.length - 1] : amounts;
-            sendResult(requestId, { amountOut: QuantumSwapSDK.formatUnits(amountOutWei, toDecimals) });
+            var quote = await dexResolveSwapQuote(payload, release, provider, 'exactIn', amountInWei);
+            swapApiSendResult(requestId, {
+                amountOut: QuantumSwapSDK.formatUnits(quote.amountWei, toDecimals),
+                path: quote.path,
+                source: quote.source,
+                indexedBlock: quote.indexedBlock,
+                pathFeeOnTransfer: quote.feeOnTransfer.length > 0
+            });
         } catch (e) {
             sendError(requestId, dexSanitizeError(e));
         }
@@ -1678,39 +2532,53 @@ Object.assign(bridge, {
             if (!payload) return;
             var provider = await dexInit(payload);
             var release = dexResolveRelease(payload);
-            var router = QuantumSwapSDK.QuantumSwapV2Router02.connect(release.router, provider);
-            var path = await dexResolveSwapPath(provider, payload.fromTokenValue, payload.toTokenValue, release);
             var fromDecimals = typeof payload.fromDecimals === 'number' ? payload.fromDecimals : 18;
             var toDecimals = typeof payload.toDecimals === 'number' ? payload.toDecimals : 18;
             var amountOutWei = QuantumSwapSDK.parseUnits(String(payload.amountOut), toDecimals);
-            var amounts = await router.getAmountsIn(amountOutWei, path);
-            var amountInWei = Array.isArray(amounts) ? amounts[0] : amounts;
-            sendResult(requestId, { amountIn: QuantumSwapSDK.formatUnits(amountInWei, fromDecimals) });
+            var quote = await dexResolveSwapQuote(payload, release, provider, 'exactOut', amountOutWei);
+            // amountInMax: the most an exact-output swap may spend (quote plus
+            // slippage); the clients size the allowance and review from it.
+            var slippagePercent = Math.max(0, Math.min(100, Number(payload.slippagePercent) || 1));
+            swapApiSendResult(requestId, {
+                amountIn: QuantumSwapSDK.formatUnits(quote.amountWei, fromDecimals),
+                amountInMax: QuantumSwapSDK.formatUnits(dexMaxWeiWithSlippage(quote.amountWei, slippagePercent), fromDecimals),
+                path: quote.path,
+                source: quote.source,
+                indexedBlock: quote.indexedBlock,
+                pathFeeOnTransfer: quote.feeOnTransfer.length > 0
+            });
         } catch (e) {
             sendError(requestId, dexSanitizeError(e));
         }
     },
 
-    // Gas estimate for the swap tx (desktop SwapQuoteEstimateGas).
-    swapEstimateGas: async function(requestId) {
+    // Swap Read API market status for the Releases screen: probe (or the
+    // memoised result) plus the DEX status counters when the API serves
+    // the active release.
+    swapApiStatus: async function(requestId) {
         try {
             if (!requireSDK(requestId)) return;
             var payload = pullPayload(requestId);
             if (!payload) return;
-            var provider = await dexInit(payload);
             var release = dexResolveRelease(payload);
-            var getAddress = QuantumSwapSDK.getAddress;
-            var router = QuantumSwapSDK.QuantumSwapV2Router02.connect(release.router, provider);
-            var toAddress = payload.recipientAddress || payload.toAddress;
-            if (!toAddress) { sendError(requestId, 'Recipient address required'); return; }
-            var path = await dexResolveSwapPath(provider, payload.fromTokenValue, payload.toTokenValue, release);
-            var deadline = await dexGetDeadline(provider, SWAP_DEADLINE_SECONDS);
-            var amounts = await dexResolveSwapAmounts(router, path, payload);
-            var tx = await router.populateTransaction.swapExactTokensForTokens(
-                amounts.amountInWei, amounts.amountOutMinWei, path, getAddress(toAddress), deadline);
-            tx.from = getAddress(toAddress);
-            var gasLimit = await provider.estimateGas(tx);
-            sendResult(requestId, { gasLimit: gasLimit.toString() });
+            await swapApiAvailable(release);
+            var out = { status: swapMarket.status, apiUrl: release.apiUrl, dexId: release.dexId,
+                        indexedBlock: swapMarket.indexedBlock, lagBlocks: swapMarket.lagBlocks,
+                        degraded: swapMarket.degraded, pairs: 0, tokens: 0 };
+            if (swapMarket.status === 'ok') {
+                try {
+                    var st = swapApiParseDexStatus(await swapApiFetch(release, 'status'), release.dexId);
+                    out.indexedBlock = st.indexedBlock;
+                    out.lagBlocks = st.lagBlocks;
+                    out.degraded = st.degraded;
+                    out.pairs = st.pairs;
+                    out.tokens = st.tokens;
+                } catch (e) {
+                    swapApiRecordFailure(e);
+                    out.status = swapMarket.status;
+                }
+            }
+            sendResult(requestId, out);
         } catch (e) {
             sendError(requestId, dexSanitizeError(e));
         }
@@ -1724,6 +2592,11 @@ Object.assign(bridge, {
             var payload = pullPayload(requestId);
             if (!payload) return;
             if (!payload.ownerAddress) { sendError(requestId, 'Owner address required'); return; }
+            // Native Q needs no allowance: it travels as tx value through the
+            // payable router entry point (see dexBuildSwapCall). Reporting it
+            // as sufficient keeps any caller from planning an "Approve WQ"
+            // step for coins the user holds unwrapped.
+            if (payload.fromTokenValue === 'Q') { sendResult(requestId, { sufficient: true, allowance: '0' }); return; }
             var provider = await dexInit(payload);
             var release = dexResolveRelease(payload);
             var getAddress = QuantumSwapSDK.getAddress;
@@ -1781,6 +2654,7 @@ Object.assign(bridge, {
             if (!requireSDK(requestId)) return;
             payload = pullPayload(requestId);
             if (!payload) return;
+            if (payload.fromTokenValue === 'Q') { sendError(requestId, 'Native coin needs no approval'); return; }
             var provider = await dexInit(payload);
             var release = dexResolveRelease(payload);
             var getAddress = QuantumSwapSDK.getAddress;
@@ -1813,20 +2687,13 @@ Object.assign(bridge, {
             if (!payload.recipientAddress) { sendError(requestId, 'Recipient address required'); return; }
             var provider = await dexInit(payload);
             var release = dexResolveRelease(payload);
-            var getAddress = QuantumSwapSDK.getAddress;
             var wallet = await dexWalletFromBinaryKeys(requestId, provider, keyRefs, payload);
-            var router = QuantumSwapSDK.QuantumSwapV2Router02.connect(release.router, wallet);
-            var path = await dexResolveSwapPath(provider, payload.fromTokenValue, payload.toTokenValue, release);
-            var deadline = await dexGetDeadline(provider, SWAP_DEADLINE_SECONDS);
-            var amounts = await dexResolveSwapAmounts(router, path, payload);
+            var call = await dexBuildSwapCall(payload, release, provider);
             var gasLimit = Number(payload.gasLimit) || 200000;
-            var tx = await router.swapExactTokensForTokens(
-                amounts.amountInWei,
-                amounts.amountOutMinWei,
-                path,
-                getAddress(payload.recipientAddress),
-                deadline,
-                dexSigningOverrides(wallet, payload, { gasLimit: gasLimit }));
+            var router = QuantumSwapSDK.QuantumSwapV2Router02.connect(release.router, wallet);
+            var overrides = dexSigningOverrides(wallet, payload,
+                call.value > 0n ? { gasLimit: gasLimit, value: call.value } : { gasLimit: gasLimit });
+            var tx = await router[call.method].apply(router, call.args.concat([overrides]));
             sendResult(requestId, { txHash: tx.hash });
         } catch (e) {
             sendError(requestId, dexSanitizeError(e));
@@ -1835,7 +2702,14 @@ Object.assign(bridge, {
         }
     },
 
-    // Browse all factory pairs with reserves (desktop LiquidityListPools).
+    // Q -> WQ (WQ.deposit, value = amount) and WQ -> Q (WQ.withdraw(amount)).
+    swapSubmitWrap: function(requestId) { return dexSubmitWrap(requestId, 'wrap'); },
+    swapSubmitUnwrap: function(requestId) { return dexSubmitWrap(requestId, 'unwrap'); },
+
+    // Browse pairs with reserves (desktop LiquidityListPools). API first:
+    // one page of 20 (payload.page / payload.sort), or every page up to
+    // the factory-walk cap when payload.all is set; the factory walk is
+    // the fallback.
     liquidityListPools: async function(requestId) {
         try {
             if (!requireSDK(requestId)) return;
@@ -1843,18 +2717,43 @@ Object.assign(bridge, {
             if (!payload) return;
             var provider = await dexInit(payload);
             var release = dexResolveRelease(payload);
-            var pairAddresses = await dexListFactoryPairAddresses(provider, release.factory);
-            var pools = await Promise.all(pairAddresses.map(function(addr) {
-                return dexReadPairSnapshot(provider, addr);
-            }));
-            sendResult(requestId, { pools: pools });
+            var page = swapApiPage(payload.page);
+            var sort = payload.sort === 'newest' ? 'newest' : 'liquidity';
+            var listed = await swapApiFirst(release, async function(dexId) {
+                if (payload.all) {
+                    var all = [];
+                    var first = null;
+                    for (var p = 1; p <= SWAP_API_MAX_PAGES; p++) {
+                        var pg = swapApiParsePage(
+                            await swapApiFetch(release, 'pools', { page: p, sort: 'newest' }), dexId, swapApiParsePool);
+                        if (!first) first = pg;
+                        all = all.concat(pg.items);
+                        if (pg.items.length === 0 || p >= pg.pageCount) break;
+                    }
+                    return { pools: all.map(swapApiPoolToSnapshot), page: 1, pageCount: 1,
+                             totalItems: first ? first.totalItems : 0,
+                             indexedBlock: first ? first.indexedBlock : 0, source: 'api' };
+                }
+                var one = swapApiParsePage(
+                    await swapApiFetch(release, 'pools', { page: page, sort: sort }), dexId, swapApiParsePool);
+                return { pools: one.items.map(swapApiPoolToSnapshot), page: one.page, pageCount: one.pageCount,
+                         totalItems: one.totalItems, indexedBlock: one.indexedBlock, source: 'api' };
+            }, async function() {
+                var pairAddresses = await dexListFactoryPairAddresses(provider, release.factory);
+                var pools = await Promise.all(pairAddresses.map(function(addr) {
+                    return dexReadPairSnapshot(provider, addr);
+                }));
+                return { pools: pools, page: 1, pageCount: 1, totalItems: pools.length, indexedBlock: 0, source: 'chain' };
+            });
+            swapApiSendResult(requestId, listed);
         } catch (e) {
             sendError(requestId, dexSanitizeError(e));
         }
     },
 
     // The owner's LP positions across all pairs (desktop
-    // LiquidityListPositions).
+    // LiquidityListPositions). API first (one request); the per-pair
+    // balanceOf scan is the fallback.
     liquidityListPositions: async function(requestId) {
         try {
             if (!requireSDK(requestId)) return;
@@ -1864,16 +2763,52 @@ Object.assign(bridge, {
             var provider = await dexInit(payload);
             var release = dexResolveRelease(payload);
             var owner = QuantumSwapSDK.getAddress(String(payload.ownerAddress));
-            var pairAddresses = await dexListFactoryPairAddresses(provider, release.factory);
-            var positions = (await Promise.all(pairAddresses.map(async function(addr) {
-                var pair = QuantumSwapSDK.QuantumSwapV2Pair.connect(addr, provider);
-                var lpBalance = dexAsBigInt(await pair.balanceOf(owner));
-                if (lpBalance <= 0n) return null;
-                var snapshot = await dexReadPairSnapshot(provider, addr);
-                snapshot.lpBalance = lpBalance.toString();
-                return snapshot;
-            }))).filter(function(p) { return p != null; });
-            sendResult(requestId, { positions: positions });
+            var listed = await swapApiFirst(release, async function(dexId) {
+                var pos = swapApiParsePositions(
+                    await swapApiFetch(release, 'positions', { account: owner.toLowerCase() }),
+                    dexId, owner.toLowerCase());
+                return {
+                    positions: pos.items.filter(function(p) { return p.lpBalance > 0n; }).map(swapApiPoolToSnapshot),
+                    capped: pos.capped, indexedBlock: pos.indexedBlock, source: 'api'
+                };
+            }, async function() {
+                var pairAddresses = await dexListFactoryPairAddresses(provider, release.factory);
+                var positions = (await Promise.all(pairAddresses.map(async function(addr) {
+                    var pair = QuantumSwapSDK.QuantumSwapV2Pair.connect(addr, provider);
+                    var lpBalance = dexAsBigInt(await pair.balanceOf(owner));
+                    if (lpBalance <= 0n) return null;
+                    var snapshot = await dexReadPairSnapshot(provider, addr);
+                    snapshot.lpBalance = lpBalance.toString();
+                    return snapshot;
+                }))).filter(function(p) { return p != null; });
+                return { positions: positions, capped: false, indexedBlock: 0, source: 'chain' };
+            });
+            swapApiSendResult(requestId, listed);
+        } catch (e) {
+            sendError(requestId, dexSanitizeError(e));
+        }
+    },
+
+    // Pairs the owner created (API only; empty when the API is unusable).
+    liquidityListPairsCreated: async function(requestId) {
+        try {
+            if (!requireSDK(requestId)) return;
+            var payload = pullPayload(requestId);
+            if (!payload) return;
+            if (!payload.ownerAddress) { sendError(requestId, 'Owner address required'); return; }
+            await dexInit(payload);
+            var release = dexResolveRelease(payload);
+            var owner = QuantumSwapSDK.getAddress(String(payload.ownerAddress)).toLowerCase();
+            var page = swapApiPage(payload.page);
+            var listed = await swapApiFirst(release, async function(dexId) {
+                var pg = swapApiParsePage(
+                    await swapApiFetch(release, 'pairsCreated', { account: owner, page: page }), dexId, swapApiParsePool);
+                return { pools: pg.items.map(swapApiPoolToSnapshot), page: pg.page, pageCount: pg.pageCount,
+                         totalItems: pg.totalItems, indexedBlock: pg.indexedBlock, source: 'api' };
+            }, function() {
+                return { pools: [], page: 1, pageCount: 0, totalItems: 0, indexedBlock: 0, source: 'none' };
+            });
+            sendResult(requestId, listed);
         } catch (e) {
             sendError(requestId, dexSanitizeError(e));
         }
@@ -1881,7 +2816,8 @@ Object.assign(bridge, {
 
     // Pair lookup for two UI token values ("Q" or contract address):
     // add-liquidity ratio autofill + create-pair existence check
-    // (desktop LiquidityGetPairInfo).
+    // (desktop LiquidityGetPairInfo). API first; getPair + snapshot +
+    // balanceOf is the fallback.
     liquidityGetPairInfo: async function(requestId) {
         try {
             if (!requireSDK(requestId)) return;
@@ -1896,25 +2832,38 @@ Object.assign(bridge, {
                 sendError(requestId, 'Identical tokens');
                 return;
             }
-            var factory = QuantumSwapSDK.QuantumSwapV2Factory.connect(release.factory, provider);
-            var pairAddr = await factory.getPair(tokenAAddress, tokenBAddress);
-            if (dexIsZeroPairAddress(String(pairAddr))) {
-                sendResult(requestId, {
-                    exists: false, tokenAAddress: tokenAAddress, tokenBAddress: tokenBAddress,
-                    pair: null, lpBalance: null
-                });
-                return;
-            }
-            var snapshot = await dexReadPairSnapshot(provider, String(pairAddr));
-            var lpBalance = null;
-            if (payload.ownerAddress) {
-                var pair = QuantumSwapSDK.QuantumSwapV2Pair.connect(String(pairAddr), provider);
-                lpBalance = dexAsBigInt(await pair.balanceOf(getAddress(String(payload.ownerAddress)))).toString();
-            }
-            sendResult(requestId, {
-                exists: true, tokenAAddress: tokenAAddress, tokenBAddress: tokenBAddress,
-                pair: snapshot, lpBalance: lpBalance
+            var ownerLower = payload.ownerAddress ? getAddress(String(payload.ownerAddress)).toLowerCase() : '';
+            var info = await swapApiFirst(release, async function(dexId) {
+                var lookup = swapApiParsePairLookup(await swapApiFetch(release, 'pair', {
+                    tokenA: tokenAAddress.toLowerCase(), tokenB: tokenBAddress.toLowerCase(), account: ownerLower
+                }), dexId);
+                if (!lookup.exists || !lookup.pair) {
+                    return { exists: false, tokenAAddress: tokenAAddress, tokenBAddress: tokenBAddress,
+                             pair: null, lpBalance: null, source: 'api', indexedBlock: lookup.indexedBlock };
+                }
+                return {
+                    exists: true, tokenAAddress: tokenAAddress, tokenBAddress: tokenBAddress,
+                    pair: swapApiPoolToSnapshot(lookup.pair),
+                    lpBalance: ownerLower ? (lookup.accountLpBalance === null ? '0' : lookup.accountLpBalance.toString()) : null,
+                    source: 'api', indexedBlock: lookup.indexedBlock
+                };
+            }, async function() {
+                var factory = QuantumSwapSDK.QuantumSwapV2Factory.connect(release.factory, provider);
+                var pairAddr = await factory.getPair(tokenAAddress, tokenBAddress);
+                if (dexIsZeroPairAddress(String(pairAddr))) {
+                    return { exists: false, tokenAAddress: tokenAAddress, tokenBAddress: tokenBAddress,
+                             pair: null, lpBalance: null, source: 'chain' };
+                }
+                var snapshot = await dexReadPairSnapshot(provider, String(pairAddr));
+                var lpBalance = null;
+                if (payload.ownerAddress) {
+                    var pair = QuantumSwapSDK.QuantumSwapV2Pair.connect(String(pairAddr), provider);
+                    lpBalance = dexAsBigInt(await pair.balanceOf(getAddress(String(payload.ownerAddress)))).toString();
+                }
+                return { exists: true, tokenAAddress: tokenAAddress, tokenBAddress: tokenBAddress,
+                         pair: snapshot, lpBalance: lpBalance, source: 'chain' };
             });
+            swapApiSendResult(requestId, info);
         } catch (e) {
             sendError(requestId, dexSanitizeError(e));
         }
@@ -2155,13 +3104,20 @@ Object.assign(bridge, {
                 var tToken = QuantumSwapSDK.IERC20.connect(getAddress(String(payload.tokenAddress)), provider);
                 tx = await tToken.populateTransaction.approve(getAddress(release.router), QuantumSwapSDK.MaxUint256);
             } else if (kind === 'swap') {
+                var swCall = await dexBuildSwapCall(payload, release, provider);
+                // Echoed to the client: which form was built and whether an
+                // exact-output request fell back to exact-in (and why).
+                var swapMeta = { swapMode: swCall.swapMode || 'exactIn',
+                                 fallback: swCall.fallback || '',
+                                 fallbackReason: swCall.fallbackReason || '' };
                 var swRouter = QuantumSwapSDK.QuantumSwapV2Router02.connect(release.router, provider);
-                var swTo = payload.recipientAddress || payload.toAddress || fromRaw;
-                var swPath = await dexResolveSwapPath(provider, payload.fromTokenValue, payload.toTokenValue, release);
-                var swDeadline = await dexGetDeadline(provider, SWAP_DEADLINE_SECONDS);
-                var swAmounts = await dexResolveSwapAmounts(swRouter, swPath, payload);
-                tx = await swRouter.populateTransaction.swapExactTokensForTokens(
-                    swAmounts.amountInWei, swAmounts.amountOutMinWei, swPath, getAddress(String(swTo)), swDeadline);
+                tx = await swRouter.populateTransaction[swCall.method].apply(swRouter.populateTransaction, swCall.args);
+                if (swCall.value && swCall.value > 0n) tx.value = swCall.value;
+            } else if (kind === 'wrap' || kind === 'unwrap') {
+                var wCall = dexBuildWrapCall(kind, payload);
+                var wq = QuantumSwapSDK.WQ.connect(release.wq, provider);
+                tx = await wq.populateTransaction[wCall.method].apply(wq.populateTransaction, wCall.args);
+                if (wCall.value > 0n) tx.value = wCall.value;
             } else if (kind === 'addLiquidity' || kind === 'removeLiquidity') {
                 var lCall = kind === 'addLiquidity'
                     ? await dexBuildAddLiquidityCall(payload, release, provider)
@@ -2186,12 +3142,18 @@ Object.assign(bridge, {
             }
             tx.from = from;
             var gas = await provider.estimateGas(tx);
-            sendResult(requestId, {
+            var estimate = {
                 gasLimit: gas.toString(),
                 router: release.router,
                 factory: release.factory,
                 wq: release.wq
-            });
+            };
+            if (swapMeta) {
+                estimate.swapMode = swapMeta.swapMode;
+                estimate.fallback = swapMeta.fallback;
+                estimate.fallbackReason = swapMeta.fallbackReason;
+            }
+            sendResult(requestId, estimate);
         } catch (e) {
             sendError(requestId, dexSanitizeError(e));
         }

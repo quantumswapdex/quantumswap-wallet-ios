@@ -28,7 +28,11 @@ public final class TokenCreateViewController: UIViewController, HomeScreenViewTy
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
+        // Transparent so HomeViewController's AmbientBackgroundView
+        // (Android body_ambient: violet / cyan orbs over #050508)
+        // shows through the whole screen instead of being blacked
+        // out by an opaque fill.
+        view.backgroundColor = .clear
         let L = Localization.shared
         walletAddress = DexScreenChrome.currentWalletAddress()
 
@@ -50,12 +54,11 @@ public final class TokenCreateViewController: UIViewController, HomeScreenViewTy
         decimalsButton.contentHorizontalAlignment = .leading
         decimalsButton.titleLabel?.font = Typography.body(15)
         decimalsButton.setTitleColor(UIColor(named: "colorCommon6") ?? .label, for: .normal)
-        decimalsButton.backgroundColor = UIColor(argbHex: 0x1AFFFFFF)
-        decimalsButton.layer.cornerRadius = 7
-        decimalsButton.layer.borderWidth = 1
-        decimalsButton.layer.borderColor = UIColor(argbHex: 0x4DFFFFFF).cgColor
+        // Android parity: spinner_dropdown_background (r6, transparent
+        // fill, 1pt colorCommon6 border, minHeight 44).
+        DexScreenChrome.applySpinnerBorder(to: decimalsButton)
         decimalsButton.contentEdgeInsets = UIEdgeInsets(top: 7, left: 12, bottom: 7, right: 12)
-        decimalsButton.heightAnchor.constraint(equalToConstant: 40).isActive = true
+        decimalsButton.heightAnchor.constraint(equalToConstant: 44).isActive = true
         decimalsButton.showsMenuAsPrimaryAction = true
         decimalsButton.menu = UIMenu(children: (1...18).map { d in
             UIAction(title: String(d)) { [weak self] _ in
@@ -73,6 +76,9 @@ public final class TokenCreateViewController: UIViewController, HomeScreenViewTy
 
         createButton.setTitle(L.lang("create", fallback: "Create"), for: .normal)
         createButton.addTarget(self, action: #selector(tapCreate), for: .touchUpInside)
+        // Same footprint as the Send screen's primary button.
+        createButton.heightAnchor.constraint(equalToConstant: 43).isActive = true
+        createButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
         spinner.hidesWhenStopped = true
         let chipView = GasChipView()
         gasChip = GasChipController(host: self, walletAddress: walletAddress, chip: chipView, kind: .deployToken)
@@ -84,7 +90,7 @@ public final class TokenCreateViewController: UIViewController, HomeScreenViewTy
         footer.alignment = .center
 
         let content = UIStackView(arrangedSubviews: [
-            backBar, title, DexScreenChrome.makeDivider(),
+            title, DexScreenChrome.makeDivider(),
             DexScreenChrome.makeLabel(L.lang("token-name", fallback: "Token Name")), nameField,
             DexScreenChrome.makeLabel(L.lang("token-symbol", fallback: "Token Symbol")), symbolField,
             DexScreenChrome.makeLabel(L.lang("token-decimals", fallback: "Decimals")), decimalsButton,
@@ -93,24 +99,20 @@ public final class TokenCreateViewController: UIViewController, HomeScreenViewTy
         ])
         content.axis = .vertical
         content.spacing = 10
-        content.setCustomSpacing(8, after: backBar)
 
         let scroll = UIScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.keyboardDismissMode = .interactive
-        content.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scroll)
-        scroll.addSubview(content)
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
-            content.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 8),
-            content.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 16),
-            content.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -16),
-            content.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -24)
+            scroll.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor)
         ])
+        // Android parity: back arrow above the 22pt gradient card,
+        // both scrolling together (center_container screen shell).
+        ScreenCard.install(in: scroll, backBar: backBar, content: content)
         view.installPressFeedbackRecursive()
     }
 
@@ -131,23 +133,27 @@ public final class TokenCreateViewController: UIViewController, HomeScreenViewTy
     }
 
     /// Returns the validated form or the first error message.
-    private func validate() -> Result<Form, String> {
+    /// Validation failure carrying the localized message. `Result`
+    /// requires an `Error` failure type; a bare `String` does not compile.
+    private struct ValidationError: Error { let message: String }
+
+    private func validate() -> Result<Form, ValidationError> {
         let L = Localization.shared
         let name = text(nameField)
         let symbol = text(symbolField)
         let supply = text(supplyField)
         if name.isEmpty || name.count > 48 || Self.containsUnsafeText(name) {
-            return .failure(L.lang("token-name-invalid", fallback: "Enter a token name (up to 48 plain-text characters)."))
+            return .failure(ValidationError(message: L.lang("token-name-invalid", fallback: "Enter a token name (up to 48 plain-text characters).")))
         }
         if symbol.range(of: #"^[A-Za-z0-9]{1,16}$"#, options: .regularExpression) == nil {
-            return .failure(L.lang("token-symbol-invalid", fallback: "Symbol must be 1-16 letters or digits."))
+            return .failure(ValidationError(message: L.lang("token-symbol-invalid", fallback: "Symbol must be 1-16 letters or digits.")))
         }
         if StablecoinImpersonatorFilter.impersonatesStablecoin(symbol: symbol, name: name) {
-            return .failure(L.lang("token-impersonator",
-                fallback: "This name or symbol is not allowed because it impersonates a stablecoin or fiat currency."))
+            return .failure(ValidationError(message: L.lang("token-impersonator",
+                fallback: "This name or symbol is not allowed because it impersonates a stablecoin or fiat currency.")))
         }
         if !Self.isValidSupply(supply, decimals: decimals) {
-            return .failure(L.lang("token-supply-invalid", fallback: "Enter a valid total supply."))
+            return .failure(ValidationError(message: L.lang("token-supply-invalid", fallback: "Enter a valid total supply.")))
         }
         return .success(Form(name: name, symbol: symbol, decimals: decimals, supply: supply))
     }
@@ -197,8 +203,8 @@ public final class TokenCreateViewController: UIViewController, HomeScreenViewTy
 
     @objc private func tapCreate() {
         switch validate() {
-        case .failure(let message):
-            setError(message)
+        case .failure(let error):
+            setError(error.message)
         case .success(let form):
             setError(nil)
             showDeploySteps(form)

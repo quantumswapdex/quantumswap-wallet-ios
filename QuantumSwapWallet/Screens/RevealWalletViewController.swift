@@ -45,7 +45,11 @@ public final class RevealWalletViewController: UIViewController, HomeScreenViewT
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
+        // Transparent so HomeViewController's AmbientBackgroundView
+        // (Android body_ambient: violet / cyan orbs over #050508)
+        // shows through the whole screen instead of being blacked
+        // out by an opaque fill.
+        view.backgroundColor = .clear
 
         let scroll = UIScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false

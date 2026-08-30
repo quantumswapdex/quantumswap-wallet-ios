@@ -11,6 +11,9 @@ public enum GasKind: String, CaseIterable {
     case approve
     case approveToken
     case swap
+    /// Q -> WQ (WQ.deposit) / WQ -> Q (WQ.withdraw): a plain ERC20-sized call.
+    case wrap
+    case unwrap
     case addLiquidity
     case removeLiquidity
     case createPair
@@ -28,6 +31,7 @@ public enum GasKind: String, CaseIterable {
         case .approve: return 84_000
         case .approveToken: return 84_000
         case .swap: return 200_000
+        case .wrap, .unwrap: return 84_000
         case .addLiquidity: return 600_000
         case .removeLiquidity: return 600_000
         case .createPair: return 4_500_000

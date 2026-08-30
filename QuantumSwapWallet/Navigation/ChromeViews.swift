@@ -28,6 +28,13 @@ public final class TopBannerView: UIView {
     public let networkChipContainer = UIView()
 
     private var bottomPadding: NSLayoutConstraint?
+    /// Required height pin: banner bottom == safe-area top + 12
+    /// (brand-row top gap) + 34 (brand-row height) + band padding.
+    /// Makes the banner's height rigid so a constraint conflict
+    /// anywhere else on the screen can never balloon the band -
+    /// Auto Layout must break an optional in the hosted child
+    /// (which then stretches correctly) instead.
+    private var heightPin: NSLayoutConstraint?
     private var brandLeading: NSLayoutConstraint?
     private var brandCenter: NSLayoutConstraint?
 
@@ -73,6 +80,10 @@ public final class TopBannerView: UIView {
 
         let pad = brandRow.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -68)
         bottomPadding = pad
+        let hp = bottomAnchor.constraint(
+            equalTo: safeAreaLayoutGuide.topAnchor, constant: 12 + 34 + 68)
+        heightPin = hp
+        hp.isActive = true
         let center = brandRow.centerXAnchor.constraint(equalTo: centerXAnchor)
         center.priority = .defaultHigh
         brandCenter = center
@@ -123,6 +134,7 @@ public final class TopBannerView: UIView {
     /// card overlaps by 56) / 12 (sub-screens, start).
     public func setBandBottomPadding(_ points: CGFloat) {
         bottomPadding?.constant = -max(0, points)
+        heightPin?.constant = 12 + 34 + max(0, points)
     }
 
     public func setBurgerHidden(_ hidden: Bool) {
@@ -318,7 +330,7 @@ public final class CenterStripView: UIView {
         let label = UILabel()
         label.text = title
         label.font = Typography.body(12)
-        label.textColor = UIColor(named: "colorPrimary") ?? .systemPurple
+        label.textColor = UIColor(named: "colorCommon6") ?? .white // Android tile label colorCommon6
         label.textAlignment = .center
 
         let col = UIStackView(arrangedSubviews: [card, label])

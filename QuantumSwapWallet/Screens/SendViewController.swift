@@ -161,7 +161,11 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
+        // Transparent so HomeViewController's AmbientBackgroundView
+        // (Android body_ambient: violet / cyan orbs over #050508)
+        // shows through the whole screen instead of being blacked
+        // out by an opaque fill.
+        view.backgroundColor = .clear
         let L = Localization.shared
 
         // 1) Back-arrow row.
@@ -241,9 +245,9 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         assetPicker.titleLabel?.font = Typography.body(16)
         assetPicker.contentHorizontalAlignment = .left
         assetPicker.contentEdgeInsets = UIEdgeInsets(top: 8, left: 12, bottom: 8, right: 36)
-        assetPicker.layer.borderWidth = 1
-        assetPicker.layer.borderColor = (UIColor.separator).cgColor
-        assetPicker.layer.cornerRadius = 6
+        // Android parity: spinner_dropdown_background (r6, transparent
+        // fill, 1pt colorCommon6 border).
+        DexScreenChrome.applySpinnerBorder(to: assetPicker)
         assetPicker.translatesAutoresizingMaskIntoConstraints = false
         assetPicker.heightAnchor.constraint(equalToConstant: 44).isActive = true
         assetPicker.showsMenuAsPrimaryAction = true
@@ -270,7 +274,7 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         // so a full 0x... contract address (~42 chars) is visible
         // when a token is selected. Native coin only fills one line.
         assetSelectedLabel.font = Typography.body(12)
-        assetSelectedLabel.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
+        assetSelectedLabel.textColor = UIColor(rgbHex: 0x9A9AA6) // Android colorMutedSecondaryText
         assetSelectedLabel.numberOfLines = 2
         assetSelectedLabel.lineBreakMode = .byCharWrapping
 
@@ -347,10 +351,9 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         toField.isScrollEnabled = false
         toField.textContainerInset = UIEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
         toField.textContainer.lineFragmentPadding = 0
-        toField.backgroundColor = .clear
-        toField.layer.borderWidth = 1
-        toField.layer.borderColor = UIColor.separator.cgColor
-        toField.layer.cornerRadius = 6
+        // Android parity: text_input_selector - no box, bottom
+        // hairline only (see DexScreenChrome.applyUnderline).
+        DexScreenChrome.applyUnderline(to: toField)
         toField.delegate = self
         toField.translatesAutoresizingMaskIntoConstraints = false
         let toFieldHeight = ceil(toField.font!.lineHeight * 2)
@@ -364,7 +367,7 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         // `refreshAddressInputState`.
         toFieldPlaceholder.text = L.getAddressToSendByLangValues()
         toFieldPlaceholder.font = toField.font
-        toFieldPlaceholder.textColor = .placeholderText
+        toFieldPlaceholder.textColor = UIColor(rgbHex: 0x9A9AA6)
         toFieldPlaceholder.numberOfLines = 1
         toFieldPlaceholder.translatesAutoresizingMaskIntoConstraints = false
         toField.addSubview(toFieldPlaceholder)
@@ -389,8 +392,11 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         // numeric-only / max 18 fractional-digits rule, so users
         // can't paste in negative numbers, scientific notation, or
         // wei amounts beyond the native coin's precision.
-        amountField.placeholder = L.getQuantityToSendByLangValues()
-        amountField.borderStyle = .roundedRect
+        amountField.attributedPlaceholder = DexScreenChrome.hintAttributed(
+            L.getQuantityToSendByLangValues(),
+            font: amountField.font ?? Typography.body(15))
+        amountField.borderStyle = .none
+        DexScreenChrome.applyUnderline(to: amountField)
         amountField.keyboardType = .decimalPad
         amountField.delegate = self
 
@@ -421,7 +427,6 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         // the per-row margins the Android `LinearLayout` uses inside
         // the card.
         let stack = UIStackView(arrangedSubviews: [
-                backBar,
                 titleRow,
                 divider,
                 networkRow,
@@ -439,7 +444,6 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         stack.axis = .vertical
         stack.alignment = .fill
         stack.spacing = 6
-        stack.setCustomSpacing(4, after: backBar)
         stack.setCustomSpacing(8, after: titleRow)
         stack.setCustomSpacing(12, after: divider)
         stack.setCustomSpacing(12, after: networkRow)
@@ -458,7 +462,6 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         scroll.alwaysBounceVertical = true
         scroll.keyboardDismissMode = .interactive
         view.addSubview(scroll)
-        scroll.addSubview(stack)
 
         // Hybrid bottom anchor (mirrors the
         // `HomeWalletViewController` pattern):
@@ -483,13 +486,11 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
                 scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
                 scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
                 safeBottom,
-                kbCap,
-                stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 8),
-                stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -8),
-                stack.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor, constant: 16),
-                stack.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor, constant: -16),
-                stack.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor, constant: -32)
+                kbCap
             ])
+        // Android parity: back arrow above the 22pt gradient card,
+        // both scrolling together (center_container screen shell).
+        ScreenCard.install(in: scroll, backBar: backBar, content: stack)
 
         // Apply alpha-dim press feedback to QR scan, asset picker, and
         // primary Send buttons. UITextFields are skipped by the helper.

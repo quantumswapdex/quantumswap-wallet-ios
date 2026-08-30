@@ -51,7 +51,11 @@ HomeScreenViewTypeProviding {
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
+        // Transparent so HomeViewController's AmbientBackgroundView
+        // (Android body_ambient: violet / cyan orbs over #050508)
+        // shows through the whole screen instead of being blacked
+        // out by an opaque fill.
+        view.backgroundColor = .clear
         let L = Localization.shared
 
         // Back bar mirrors Android `imageButton_blockchain_network_back_arrow`
@@ -105,7 +109,7 @@ HomeScreenViewTypeProviding {
         let addLink = UIButton(type: .system)
         addLink.setTitle(L.getAddNetworkByLangValues(), for: .normal)
         addLink.titleLabel?.font = Typography.mediumLabel(16)
-        addLink.setTitleColor(UIColor(named: "colorCommonSeedA") ?? .systemBlue, for: .normal)
+        addLink.setTitleColor(UIColor(rgbHex: 0x9B73FF), for: .normal)
         addLink.contentHorizontalAlignment = .center
         addLink.backgroundColor = .clear
         addLink.translatesAutoresizingMaskIntoConstraints = false
@@ -415,7 +419,11 @@ public final class BlockchainNetworkAddViewController: UIViewController, HomeScr
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
+        // Transparent so HomeViewController's AmbientBackgroundView
+        // (Android body_ambient: violet / cyan orbs over #050508)
+        // shows through the whole screen instead of being blacked
+        // out by an opaque fill.
+        view.backgroundColor = .clear
         let L = Localization.shared
 
         let backBar = makeBackBar(action: #selector(tapBack))

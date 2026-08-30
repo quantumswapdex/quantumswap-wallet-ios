@@ -135,4 +135,18 @@ enum RecognizedTokens {
         guard let raw = contract, !raw.isEmpty else { return false }
         return all.contains(raw.lowercased())
     }
+
+    /// Tokens that burn or tax on transfer. The router has no fee-safe
+    /// exact-output form, so the swap screen keeps pairs touching one of
+    /// these exact-in (mirrors bridge.html
+    /// FEE_ON_TRANSFER_TOKEN_CONTRACT_ADDRESSES and Android
+    /// RecognizedTokens.isFeeOnTransfer). Lower-case entries.
+    static let feeOnTransfer: Set<String> = [heisen.lowercased(), y2q.lowercased()]
+
+    /// `true` iff the contract is a listed fee-on-transfer token; `nil`,
+    /// empty and the native sentinel return `false`.
+    static func isFeeOnTransfer(_ contract: String?) -> Bool {
+        guard let raw = contract, !raw.isEmpty else { return false }
+        return feeOnTransfer.contains(raw.lowercased())
+    }
 }

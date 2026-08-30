@@ -34,11 +34,17 @@ public struct TxStep {
     public let submitMethod: String
     public let submitPayload: () -> [String: Any]
     public let reviewOverride: ReviewSpec?
+    /// Sees the bridge echo of a successful estimate (never a fallback),
+    /// so a screen can react to what the estimate decided -- e.g. the
+    /// swap screen restarting when the bridge reports an exact-in
+    /// fallback. May dismiss the dialog.
+    public let onEstimated: (([String: Any]) -> Void)?
 
     public init(label: String, kind: GasKind, pairExists: Bool = true,
                 estimatePayload: @escaping () -> [String: Any],
                 submitMethod: String, submitPayload: @escaping () -> [String: Any],
-                reviewOverride: ReviewSpec? = nil) {
+                reviewOverride: ReviewSpec? = nil,
+                onEstimated: (([String: Any]) -> Void)? = nil) {
         self.label = label
         self.kind = kind
         self.pairExists = pairExists
@@ -46,6 +52,7 @@ public struct TxStep {
         self.submitMethod = submitMethod
         self.submitPayload = submitPayload
         self.reviewOverride = reviewOverride
+        self.onEstimated = onEstimated
     }
 }
 
@@ -76,7 +83,7 @@ public final class TxStepsDialogViewController: ModalDialogViewController {
     private let stepsStack = UIStackView()
     private let hashRow = UIStackView()
     private let hashLabel = UILabel()
-    private let hashValue = UITextView()
+    private let hashValueView = UITextView()
     private let resultBlock = UIStackView()
     private let errorLabel = UILabel()
     private let footerSpinner = UIActivityIndicatorView(style: .medium)
@@ -166,18 +173,18 @@ public final class TxStepsDialogViewController: ModalDialogViewController {
         let hashHeader = UIStackView(arrangedSubviews: [hashLabel, hashButtons])
         hashHeader.axis = .horizontal
         hashHeader.alignment = .center
-        hashValue.isEditable = false
-        hashValue.isScrollEnabled = false
-        hashValue.backgroundColor = .clear
-        hashValue.textContainerInset = .zero
-        hashValue.textContainer.lineFragmentPadding = 0
-        hashValue.textContainer.lineBreakMode = .byCharWrapping
-        hashValue.font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        hashValue.textColor = UIColor(named: "colorCommon6") ?? .white
+        hashValueView.isEditable = false
+        hashValueView.isScrollEnabled = false
+        hashValueView.backgroundColor = .clear
+        hashValueView.textContainerInset = .zero
+        hashValueView.textContainer.lineFragmentPadding = 0
+        hashValueView.textContainer.lineBreakMode = .byCharWrapping
+        hashValueView.font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        hashValueView.textColor = UIColor(named: "colorCommon6") ?? .white
         hashRow.axis = .vertical
         hashRow.spacing = 4
         hashRow.addArrangedSubview(hashHeader)
-        hashRow.addArrangedSubview(hashValue)
+        hashRow.addArrangedSubview(hashValueView)
         hashRow.isHidden = true
 
         resultBlock.axis = .vertical
@@ -296,6 +303,25 @@ public final class TxStepsDialogViewController: ModalDialogViewController {
                 self.stepGasLimit = result.gasLimit
                 self.stepFeeNumber = result.feeNumber
                 self.gasChip.setFeeText(GasFee.formatQ(result.feeNumber))
+                if result.usedFallback {
+                    // The estimate failed (typically the node's revert reason)
+                    // and the kind default was substituted. Say so, show the
+                    // returned error, and point at the gas icon: silently
+                    // submitting with the default limit is how a swap ran out
+                    // of gas on-chain with no hint of the underlying revert.
+                    let L = Localization.shared
+                    var notice = L.err("gasEstimateError",
+                        fallback: "Could not fetch the gas fee from the network. Using the default estimate.")
+                    if let e = result.error?.trimmingCharacters(in: .whitespacesAndNewlines), !e.isEmpty {
+                        notice += " " + e
+                    }
+                    notice += " " + L.lang("gas-set-manually-hint",
+                        fallback: "Tap the gas icon to set the gas limit manually.")
+                    self.setError(notice)
+                } else if let hook = step.onEstimated {
+                    hook(result.extra)
+                    if self.stale(id) { return }      // the hook may have dismissed
+                }
             }
             GasIconPulse.stop(self.gasChip.iconView)
             if self.states[self.current] == .active { self.states[self.current] = .ready }
@@ -464,8 +490,18 @@ public final class TxStepsDialogViewController: ModalDialogViewController {
     }
 
     private func onGasIconTap() {
-        guard stepGasLimit > 0, !stepFeeNumber.isEmpty else { return }
-        let dlg = GasConfigDialogViewController(gasLimit: stepGasLimit, feeNumber: stepFeeNumber)
+        // No estimate yet (or a failed one): open the editor pre-filled with the
+        // kind default rather than doing nothing -- that is exactly when the
+        // user needs to set the limit by hand. Same fallback GasChipController uses.
+        var limit = stepGasLimit
+        var fee = stepFeeNumber
+        if limit <= 0 || fee.isEmpty {
+            guard current >= 0, current < steps.count else { return }
+            let s = steps[current]
+            limit = s.kind.defaultFor(pairExists: s.pairExists)
+            fee = GasFee.feeNumberFor(gasLimit: limit, address: walletAddress)
+        }
+        let dlg = GasConfigDialogViewController(gasLimit: limit, feeNumber: fee)
         dlg.onOk = { [weak self] limit, fee in
             guard let self else { return }
             self.gasToken += 1
@@ -493,7 +529,7 @@ public final class TxStepsDialogViewController: ModalDialogViewController {
 
     private func setHash(_ txHash: String?) {
         currentTxHash = txHash
-        hashValue.text = txHash ?? ""
+        hashValueView.text = txHash ?? ""
         hashRow.isHidden = txHash == nil
     }
 

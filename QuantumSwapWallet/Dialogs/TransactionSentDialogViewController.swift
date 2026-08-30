@@ -1,7 +1,8 @@
 // TransactionSentDialogViewController.swift
 // Send-completed dialog with LIVE on-chain status (desktop
 // #modalSendCompleted + waitForTxSuccess):
-//   "Your transaction request has been sent."
+//   "Your transaction has been submitted. It can take upto a minute
+//   to process the transaction. You may close this dialog now."
 //   [spinner] Checking transaction status... / Waiting... / Checking...
 //   Transaction ID  <hash>  [copy] [explorer]
 //   [ OK ]
@@ -23,6 +24,10 @@ public final class TransactionSentDialogViewController: ModalDialogViewControlle
 
     private let txHash: String
     private let fromAddress: String
+    /// Headline "Your transaction has been submitted..." message.
+    /// Held as a property so the settle callbacks can hide it once
+    /// the final success / failure status replaces it.
+    private let messageLabel = UILabel()
     private let statusSpinner = UIActivityIndicatorView(style: .medium)
     private let statusIcon = UIImageView()
     private let statusLabel = UILabel()
@@ -43,8 +48,14 @@ public final class TransactionSentDialogViewController: ModalDialogViewControlle
         super.viewDidLoad()
         let L = Localization.shared
 
-        let title = UILabel()
-        title.text = L.getTransactionSentByLangValues()
+        let title = messageLabel
+        // Android parity (SendFragment.sendCompletedDialogFragment):
+        // same lang key + fallback as the Android send-completed
+        // dialog's message text, replacing the earlier shorter
+        // "Your transaction request has been sent." title.
+        title.text = L.lang(
+            "send-transaction-send-message-description",
+            fallback: "Your transaction has been submitted. It can take upto a minute to process the transaction. You may close this dialog now.")
         title.font = Typography.boldTitle(15)
         title.textColor = UIColor(named: "colorCommon6") ?? .label
         title.numberOfLines = 0
@@ -155,6 +166,9 @@ public final class TransactionSentDialogViewController: ModalDialogViewControlle
                     self.statusIcon.isHidden = false
                     self.statusLabel.text = L.lang("send-transaction-succeeded",
                                                    fallback: "Transaction completed successfully.")
+                    // The final status supersedes the "has been
+                    // submitted... may close now" headline; hide it.
+                    self.messageLabel.isHidden = true
                     self.bigCheck.isHidden = false
                 },
                 onFailed: { [weak self] error in
@@ -165,6 +179,7 @@ public final class TransactionSentDialogViewController: ModalDialogViewControlle
                     var text = L.lang("send-transaction-failed", fallback: "Transaction failed.")
                     if let error, !error.isEmpty { text += " " + DexBridgeResult.sanitizeError(error) }
                     self.statusLabel.text = text
+                    self.messageLabel.isHidden = true
                 }))
     }
 

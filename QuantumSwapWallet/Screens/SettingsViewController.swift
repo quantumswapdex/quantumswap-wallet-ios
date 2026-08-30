@@ -20,7 +20,11 @@ public final class SettingsViewController: UIViewController, HomeScreenViewTypeP
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
+        // Transparent so HomeViewController's AmbientBackgroundView
+        // (Android body_ambient: violet / cyan orbs over #050508)
+        // shows through the whole screen instead of being blacked
+        // out by an opaque fill.
+        view.backgroundColor = .clear
         let L = Localization.shared
 
         // Back arrow row at the top - tap returns to whichever primary
@@ -55,23 +59,18 @@ public final class SettingsViewController: UIViewController, HomeScreenViewTypeP
             showBottomDivider: false)
 
         let stack = UIStackView(arrangedSubviews: [
-                backBar, title, titleRule, networks, releases, advanced, signing, backup
+                title, titleRule, networks, releases, advanced, signing, backup
             ])
         stack.axis = .vertical
         stack.spacing = 0
         // Breathing room above and below the title rule so the line
         // sits visually centered between the title text and the first
         // tappable row.
-        stack.setCustomSpacing(8, after: backBar)
         stack.setCustomSpacing(8, after: title)
         stack.setCustomSpacing(8, after: titleRule)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(stack)
-        NSLayoutConstraint.activate([
-                stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-                stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-                stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16)
-            ])
+        // Android parity: back arrow above the 22pt gradient card
+        // (center_container screen shell; content is short, no scroll).
+        ScreenCard.installUnscrolled(in: view, backBar: backBar, content: stack)
 
         // Apply alpha-dim press feedback to each tappable list row.
         view.installPressFeedbackRecursive()

@@ -38,7 +38,11 @@ HomeScreenViewTypeProviding {
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
+        // Transparent so HomeViewController's AmbientBackgroundView
+        // (Android body_ambient: violet / cyan orbs over #050508)
+        // shows through the whole screen instead of being blacked
+        // out by an opaque fill.
+        view.backgroundColor = .clear
 
         contentStack.axis = .vertical
         contentStack.spacing = 14
@@ -290,18 +294,14 @@ HomeScreenViewTypeProviding {
     }
 
     private func makePrimaryButton(_ title: String) -> UIButton {
-        let b = UIButton(type: .system)
+        // Android parity: every onboarding Next and the Backup
+        // buttons use `button_green_selector` - the same teal-glass
+        // pill as the Send screen's primary button - sized to the
+        // Send button's 43pt / >=96pt footprint.
+        let b = GreenPillButton(type: .system)
         b.setTitle(title, for: .normal)
-        b.titleLabel?.font = Typography.mediumLabel(15)
-        b.backgroundColor = UIColor(named: "colorPrimary") ?? .systemBlue
-        // `colorCommon7` is white in light mode and black in dark mode.
-        // Matches the convention already used by `GreenPillButton` /
-        // `GrayPillButton` so the `Backup to File` title flips to black
-        // in dark mode instead of staying hard-coded white against the
-        // purple pill.
-        b.setTitleColor(UIColor(named: "colorCommon7") ?? .white, for: .normal)
-        b.layer.cornerRadius = 10
-        b.heightAnchor.constraint(equalToConstant: 44).isActive = true
+        b.heightAnchor.constraint(equalToConstant: 43).isActive = true
+        b.widthAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
         return b
     }
 }

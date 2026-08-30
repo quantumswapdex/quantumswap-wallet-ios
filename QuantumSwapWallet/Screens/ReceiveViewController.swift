@@ -23,7 +23,11 @@ public final class ReceiveViewController: UIViewController, HomeScreenViewTypePr
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
+        // Transparent so HomeViewController's AmbientBackgroundView
+        // (Android body_ambient: violet / cyan orbs over #050508)
+        // shows through the whole screen instead of being blacked
+        // out by an opaque fill.
+        view.backgroundColor = .clear
         let L = Localization.shared
 
         let address = resolveCurrentAddress()
@@ -124,22 +128,26 @@ public final class ReceiveViewController: UIViewController, HomeScreenViewTypePr
         // Stack order from Android `receive_fragment.xml`:
         // back bar, title, divider, red warning, address, copy row, QR.
         let stack = UIStackView(arrangedSubviews: [
-                backBar, titleLabel, divider, warningLabel,
+                titleLabel, divider, warningLabel,
                 addressLabel, copyRow, qrView
             ])
         stack.axis = .vertical
         stack.spacing = 12
         stack.alignment = .center
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(stack)
+        // Android parity: back arrow above the 22pt gradient card,
+        // both inside a scroll so small screens can still reach the
+        // QR (center_container screen shell).
+        let scroll = UIScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(scroll)
         NSLayoutConstraint.activate([
-                stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 16),
-                stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-                stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-
-                backBar.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
-                backBar.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
-
+                scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+                scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                scroll.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor)
+            ])
+        ScreenCard.install(in: scroll, backBar: backBar, content: stack)
+        NSLayoutConstraint.activate([
                 divider.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
                 divider.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
 

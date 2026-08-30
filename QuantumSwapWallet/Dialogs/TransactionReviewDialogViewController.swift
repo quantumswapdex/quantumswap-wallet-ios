@@ -116,7 +116,13 @@ public final class TransactionReviewDialogViewController: ModalDialogViewControl
         // the available height (the base class keeps the card above
         // the keyboard with a required constraint).
         let wrap = rowsScroll.heightAnchor.constraint(equalTo: rowsScroll.contentLayoutGuide.heightAnchor)
-        wrap.priority = .defaultHigh
+        // MUST stay below the rows' vertical compression resistance
+        // (750): at exactly .defaultHigh Auto Layout could satisfy the
+        // 42% cap by crushing the row labels to zero height (values
+        // overlapping, headings invisible, contentSize == frame so the
+        // block would not even scroll) instead of breaking this wrap.
+        // 749 guarantees the wrap breaks first, so overflow scrolls.
+        wrap.priority = .defaultHigh - 1
         let cap = rowsScroll.heightAnchor.constraint(
             lessThanOrEqualToConstant: UIScreen.main.bounds.height * 0.42)
         cap.priority = .required
@@ -206,7 +212,11 @@ public final class TransactionReviewDialogViewController: ModalDialogViewControl
         h.font = Typography.boldTitle(13)
         h.textColor = UIColor(rgbHex: 0xE0E0E6)
         h.numberOfLines = 0
+        // Belt-and-braces for the wrap-priority fix above: row content
+        // must never be vertically crushed - overflow scrolls instead.
+        h.setContentCompressionResistancePriority(.required, for: .vertical)
         let v = ExplorerLinks.makeValueLabel(value, url: link, mono: mono, size: 12, color: color)
+        v.setContentCompressionResistancePriority(.required, for: .vertical)
         let section = UIStackView(arrangedSubviews: [h, v])
         section.axis = .vertical
         section.spacing = 2

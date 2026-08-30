@@ -56,7 +56,16 @@ public enum DexPayloads {
 public enum DexBridgeResult {
 
     /// Unwrap `{ success, data }` from a DEX bridge response.
+    /// Unwraps the bridge envelope and surfaces a Swap Read API fallback
+    /// (`apiFallback`) as a transient toast before the caller renders
+    /// the RPC result. Submit results never carry the field.
     public static func unwrapData(_ json: String) throws -> [String: Any] {
+        let data = try unwrapDataRaw(json)
+        SwapApiToast.showIfFallback(data)
+        return data
+    }
+
+    public static func unwrapDataRaw(_ json: String) throws -> [String: Any] {
         guard let data = json.data(using: .utf8),
         let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
         let inner = obj["data"] as? [String: Any] else {

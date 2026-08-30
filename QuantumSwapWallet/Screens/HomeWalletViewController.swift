@@ -87,7 +87,11 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
+        // Transparent so HomeViewController's AmbientBackgroundView
+        // (Android body_ambient: violet / cyan orbs over #050508)
+        // shows through the whole screen instead of being blacked
+        // out by an opaque fill.
+        view.backgroundColor = .clear
 
         contentStack.axis = .vertical
         contentStack.spacing = 14
@@ -470,7 +474,7 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
             RestoreFlow.shared.onComplete = { [weak self] in
                 guard let self = self,
                 RestoreFlow.shared.didImportAny else { return }
-                self.finishAndRouteHome()
+                self.presentPostRestoreUnlockGateThenRouteHome()
             }
             RestoreFlow.shared.restoreFromFile(from: self,
                 strongboxPassword: pw)
@@ -505,7 +509,7 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
             RestoreFlow.shared.onComplete = { [weak self] in
                 guard let self = self,
                 RestoreFlow.shared.didImportAny else { return }
-                self.finishAndRouteHome()
+                self.presentPostRestoreUnlockGateThenRouteHome()
             }
             RestoreFlow.shared.runBatch(urls: files(), host: self,
                 strongboxPassword: strongboxPassword)
@@ -1546,6 +1550,65 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         }
     }
 
+    /// Post-restore unlock gate for the restore-from-file / restore-from-
+    /// folder paths. Mirror of Android `completeRestoreNavigation` ->
+    /// `requirePasswordReentryThenNavigate`: after a FIRST-TIME restore
+    /// (this session created the strongbox from `chosenPassword`), make the
+    /// user retype the app password before routing home so a mismatch
+    /// between what they think they chose and what the strongbox holds
+    /// surfaces NOW -- not on the next cold launch, when the wallet would
+    /// simply refuse to open. Same gate the create / restore-from-seed
+    /// paths already apply in `tapBackupDone`.
+    ///
+    /// Validation is `verifyOnlyIfPresent`, NEVER `bootstrapOrUnlock`: the
+    /// strongbox definitively exists here, and a gate backed by the
+    /// create-capable variant would let a typo silently define a new
+    /// password on any state regression.
+    ///
+    /// Post-onboarding restores (`chosenPassword` empty) route straight
+    /// home: `resolveStrongboxWritePassword` already verified the app
+    /// password for this session, and gating again would double-prompt.
+    /// Pinned by `FirstTimeRestoreUnlockGateTests`.
+    private func presentPostRestoreUnlockGateThenRouteHome() {
+        if chosenPassword.isEmpty {
+            finishAndRouteHome()
+            return
+        }
+        let dlg = UnlockDialogViewController()
+        dlg.onUnlock = { [weak self, weak dlg] pw in
+            guard let self = self, let dlg = dlg else { return }
+            if pw.isEmpty {
+                self.showEmptyPasswordError(over: dlg)
+                return
+            }
+            let wait = WaitDialogViewController(
+                message: Localization.shared.getWaitUnlockByLangValues())
+            dlg.present(wait, animated: true)
+            Task.detached(priority: .userInitiated) { [weak self, weak dlg, weak wait] in
+                var failure: Error? = nil
+                do {
+                    try Self.verifyOnlyIfPresent(password: pw)
+                } catch {
+                    failure = error
+                }
+                let err = failure
+                await MainActor.run {
+                    wait?.dismiss(animated: true) {
+                        if err == nil {
+                            self?.chosenPassword = ""
+                            dlg?.dismiss(animated: true) {
+                                self?.finishAndRouteHome()
+                            }
+                        } else if let dlg = dlg {
+                            self?.showUnlockError(over: dlg, error: err)
+                        }
+                    }
+                }
+            }
+        }
+        present(dlg, animated: true)
+    }
+
     private func finishAndRouteHome() {
         (parent as? HomeViewController)?.showMain()
     }
@@ -1665,7 +1728,7 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
                 string: text,
                 attributes: [
                     .underlineStyle: NSUnderlineStyle.single.rawValue,
-                    .foregroundColor: UIColor(named: "colorPrimary") ?? UIColor.systemBlue,
+                    .foregroundColor: UIColor(rgbHex: 0x9B73FF),
                     .font: Typography.mediumLabel(15)
                 ]), for: .normal)
         b.titleLabel?.numberOfLines = 0
@@ -1676,7 +1739,7 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         return b
     }
 
-    /// Underlined system-blue "Skip" link used on the verify-seed
+    /// Underlined violet "Skip" link used on the verify-seed
     /// screen. Mirrors Android `textView_home_seed_words_edit_skip`
     /// (`textColor=#2196F3`, `textSize=16dp`, end-aligned).
     /// Implemented as a UIButton so it picks up the standard
@@ -1687,7 +1750,7 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
                 string: text,
                 attributes: [
                     .underlineStyle: NSUnderlineStyle.single.rawValue,
-                    .foregroundColor: UIColor.systemBlue,
+                    .foregroundColor: UIColor(rgbHex: 0x9B73FF),
                     .font: Typography.mediumLabel(16)
                 ]), for: .normal)
         b.contentHorizontalAlignment = .trailing
@@ -1760,8 +1823,8 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
     private func makeNextButton(title: String? = nil) -> UIButton {
         let b = makePrimaryButton(title ?? Localization.shared.getNextByLangValues())
         // Hug content tightly so the button is "normal width", not the
-        // full content-stack width.
-        b.contentEdgeInsets = UIEdgeInsets(top: 0, left: 22, bottom: 0, right: 22)
+        // full content-stack width. Insets come from GreenPillButton
+        // so the pill matches the Send button exactly.
         b.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         b.setContentCompressionResistancePriority(.required, for: .horizontal)
         return b
@@ -2008,18 +2071,14 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
     }
 
     private func makePrimaryButton(_ title: String) -> UIButton {
-        let b = UIButton(type: .system)
+        // Android parity: every onboarding Next and the Backup
+        // buttons use `button_green_selector` - the same teal-glass
+        // pill as the Send screen's primary button - sized to the
+        // Send button's 43pt / >=96pt footprint.
+        let b = GreenPillButton(type: .system)
         b.setTitle(title, for: .normal)
-        b.titleLabel?.font = Typography.mediumLabel(15)
-        b.backgroundColor = UIColor(named: "colorPrimary") ?? .systemBlue
-        // `colorCommon7` is white in light mode and black in dark mode.
-        // Matches the convention already used by `GreenPillButton` /
-        // `GrayPillButton` so the onboarding `Next` and `Backup to File`
-        // titles flip to black in dark mode instead of staying
-        // hard-coded white against the purple pill.
-        b.setTitleColor(UIColor(named: "colorCommon7") ?? .white, for: .normal)
-        b.layer.cornerRadius = 10
-        b.heightAnchor.constraint(equalToConstant: 44).isActive = true
+        b.heightAnchor.constraint(equalToConstant: 43).isActive = true
+        b.widthAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
         return b
     }
 }
@@ -2218,18 +2277,10 @@ public final class SeedChipGrid: UIView {
     }
 
     /// Caption label `A1`..`L4` rendered above the word cell row.
-    /// Centered, 11pt, tinted `colorCommonSeed{Letter}` (block colour),
-    /// matching Android `textView_home_seed_words_view_caption_*`.
-    /// Row H is a dark-mode special case: `colorCommonSeedH` is pure
-    /// `#000000` in BOTH light and dark variants of the asset (Android
-    /// parity), so painting the H1..H4 captions with that asset would
-    /// render invisible black text against the near-black backdrop in
-    /// dark mode. Swap the H row to `colorCommon6` (black light /
-    /// white dark) so the captions stay legible in either appearance;
-    /// every other row keeps its vivid block colour because that
-    /// already contrasts against both light and dark backgrounds.
-    /// `UILabel.textColor` is trait-aware, so the swap reacts
-    /// automatically when the user toggles dark mode at runtime.
+    /// Centered, 11pt, hard-coded white in both light and dark mode
+    /// (matching the white seed-word foreground on the coloured
+    /// chips), replacing the earlier per-row `colorCommonSeed{Letter}`
+    /// tint.
     private func captionLabel(for index: Int) -> UILabel {
         let letter = Self.letter(for: index)
         let column = (index % 4) + 1
@@ -2237,11 +2288,7 @@ public final class SeedChipGrid: UIView {
         l.text = "\(letter)\(column)"
         l.font = Typography.body(11)
         l.textAlignment = .center
-        let captionColor: UIColor =
-            (letter == "H"
-             ? (UIColor(named: "colorCommon6") ?? .label)
-             : (UIColor(named: "colorCommonSeed\(letter)") ?? .label))
-        l.textColor = captionColor
+        l.textColor = .white
         return l
     }
 
